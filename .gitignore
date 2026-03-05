@@ -1,0 +1,7 @@
+.DS_Store
+.claude/
+.idea/
+.ruff_cache/
+.venv/
+CLAUDE.md
+tmp/
