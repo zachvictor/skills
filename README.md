@@ -37,10 +37,10 @@ cp -r commit-msg .codex/skills/
 cp -r commit-msg .opencode/skills/
 ```
 
-You can also use Vercel's [`add-skill`](https://www.npmjs.com/package/add-skill) to auto-detect your tools:
+You can also use Vercel's [`skills`](https://github.com/vercel-labs/skills) CLI to auto-detect your tools:
 
 ```bash
-npx add-skill https://github.com/zvictor/skills --skill commit-msg
+npx skills add https://github.com/zachvictor/skills --skill commit-msg
 ```
 
 ## Structure
