@@ -475,11 +475,35 @@ def _dep_array_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _poetry_dep_spans(text: str) -> list[tuple[int, int]]:
+    """Return (start, end) offsets of [tool.poetry.*dependencies] table bodies.
+
+    `pkg = "<version>"` is only a dependency inside one of these tables. The
+    same shape in [project.scripts] is an entry point, and in [tool.*] it is
+    ordinary config, so the Poetry rewrites below must not roam the whole file.
+    """
+    spans: list[tuple[int, int]] = []
+    start: int | None = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if _TABLE_HEADER_RE.match(line):
+            if start is not None:
+                spans.append((start, offset))
+                start = None
+            if _POETRY_DEP_SECTION_RE.match(line.strip()):
+                start = offset + len(line)
+        offset += len(line)
+    if start is not None:
+        spans.append((start, len(text)))
+    return spans
+
+
 def update_pyproject_toml(path: Path, updates: dict[str, str], operator: str):
     """Rewrite pyproject.toml dependency version strings.
 
     Handles PEP 621 arrays (including entries that carry no version yet) and
-    both Poetry spellings, in either quote style.
+    both Poetry spellings, in either quote style. The three passes are scoped
+    to disjoint regions of the file, so they cannot rewrite each other's work.
     """
     text = path.read_text()
 
@@ -508,8 +532,9 @@ def update_pyproject_toml(path: Path, updates: dict[str, str], operator: str):
             )
         text = text[:start] + segment + text[end:]
 
+    # PEP 621 style: 'pkg[extras]>=1.0' or "pkg[extras]>=1.0". Left unscoped —
+    # requiring name+operator+digit inside one quoted string is self-limiting.
     for pkg, ver in updates.items():
-        # PEP 621 style: 'pkg[extras]>=1.0' or "pkg[extras]>=1.0"
         pinned = re.compile(
             _QOPEN
             + r"(?P<name>"
@@ -522,12 +547,14 @@ def update_pyproject_toml(path: Path, updates: dict[str, str], operator: str):
             + _QCLOSE,
             re.IGNORECASE,
         )
-        if pinned.search(text):
-            text = pinned.sub(
-                lambda m, v=ver: f"{m['q']}{m['name']}{operator}{v}{m['q']}",
-                text,
-            )
-        else:
+        text = pinned.sub(
+            lambda m, v=ver: f"{m['q']}{m['name']}{operator}{v}{m['q']}",
+            text,
+        )
+
+    for start, end in reversed(_poetry_dep_spans(text)):
+        segment = text[start:end]
+        for pkg, ver in updates.items():
             # Poetry simple: pkg = "^1.0" or pkg = '^1.0'
             simple = re.compile(
                 r"^(" + re.escape(pkg) + r"\s*=\s*)" + _QOPEN + _QBODY + _QCLOSE,
@@ -544,10 +571,11 @@ def update_pyproject_toml(path: Path, updates: dict[str, str], operator: str):
                 re.MULTILINE | re.IGNORECASE,
             )
             for pattern in (simple, table):
-                text = pattern.sub(
+                segment = pattern.sub(
                     lambda m, v=ver: f"{m.group(1)}{m['q']}{operator}{v}{m['q']}",
-                    text,
+                    segment,
                 )
+        text = text[:start] + segment + text[end:]
 
     path.write_text(text)
 

@@ -179,6 +179,10 @@ def test_unpinned_optional_dependencies_get_pinned(tmp_path):
             '[tool.poetry]\npackages = [{include = "requests"}]\n',
             id="poetry-packages-table",
         ),
+        pytest.param(
+            '[project.scripts]\nrequests = "requests:main"\n',
+            id="console-script-entry-point",
+        ),
     ],
 )
 def test_bare_package_name_outside_a_dependency_array_is_untouched(tmp_path, src):
@@ -191,6 +195,52 @@ def test_include_group_table_is_not_mistaken_for_a_bare_dependency(tmp_path):
     src = '[dependency-groups]\ndev = [{include-group = "pytest"}, "requests"]\n'
     assert update(tmp_path, src) == (
         '[dependency-groups]\ndev = [{include-group = "pytest"}, "requests~=2.32.5"]\n'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scoping: `pkg = "<string>"` is a dependency only inside a Poetry dependency
+# table. Elsewhere the same shape is an entry point or ordinary config.
+# ---------------------------------------------------------------------------
+
+
+def test_poetry_group_dependencies_are_updated(tmp_path):
+    src = "[tool.poetry.group.dev.dependencies]\npytest = '^8.0'\n"
+    assert update(tmp_path, src) == (
+        "[tool.poetry.group.dev.dependencies]\npytest = '~=8.4.0'\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        pytest.param(
+            '[tool.black]\nrequests = "not-a-dependency"\n', id="unrelated-tool-table"
+        ),
+        pytest.param('[project.scripts]\nflask = "flask.cli:main"\n', id="entry-point"),
+        pytest.param(
+            '[tool.poetry.scripts]\npytest = "pytest:main"\n', id="poetry-cli"
+        ),
+    ],
+)
+def test_key_value_outside_a_poetry_dependency_table_is_untouched(tmp_path, src):
+    assert update(tmp_path, src) == src
+
+
+def test_poetry_table_scoping_ends_at_the_next_header(tmp_path):
+    src = (
+        "[tool.poetry.dependencies]\n"
+        "requests = '^2.28.0'\n"
+        "\n"
+        "[tool.poetry.scripts]\n"
+        "flask = 'flask.cli:main'\n"
+    )
+    assert update(tmp_path, src) == (
+        "[tool.poetry.dependencies]\n"
+        "requests = '~=2.32.5'\n"
+        "\n"
+        "[tool.poetry.scripts]\n"
+        "flask = 'flask.cli:main'\n"
     )
 
 
