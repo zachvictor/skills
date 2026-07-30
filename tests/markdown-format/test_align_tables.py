@@ -115,6 +115,28 @@ def test_trailing_newline_is_preserved():
     assert not at.align("| a |\n|---|").endswith("\n")
 
 
+def test_indent_is_the_full_leading_whitespace_run():
+    # `\s` covers Unicode whitespace, not only space and tab, and the indent
+    # comes back verbatim rather than normalised.
+    assert at.split_row("\t\t| a |")[0] == "\t\t"
+    assert at.split_row("  \t | a |")[0] == "  \t "
+    # NBSP as an escape, since a literal one in source is invisible.
+    assert at.split_row("\u00a0| a |")[0] == "\u00a0"
+    assert at.split_row("| a |")[0] == ""
+
+
+def test_whitespace_only_line_is_not_a_table_row():
+    src = "   \n| a | bb |\n|---|---|\n| c | d |\n"
+    assert at.align(src).split("\n")[0] == "   "
+
+
+def test_indented_fence_toggles_fence_state():
+    # An indented fence still opens and closes, so the table inside it is left
+    # alone rather than aligned.
+    src = "  ```\n  | this | is sample output |\n  |--|--|\n  ```\n"
+    assert at.align(src) == src
+
+
 def test_escaped_pipe_is_content_not_a_delimiter():
     # `\|` is the only way to put a literal pipe in a GFM cell. Splitting on
     # every pipe made this row one cell wider than the rest, which corrupts the

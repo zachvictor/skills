@@ -18,6 +18,11 @@ import re
 import sys
 from pathlib import Path
 
+# The whole grammar this script recognizes, in one place. Every pattern is
+# used with `.match()`, which anchors at position 0 on its own; the leading `^`
+# is kept so each pattern states its own anchoring rather than relying on the
+# caller's choice of method.
+
 # A separator cell is dashes with optional leading/trailing alignment colons.
 _SEP_CELL = re.compile(r"^:?-+:?$")
 
@@ -27,10 +32,18 @@ _SEP_CELL = re.compile(r"^:?-+:?$")
 # row into a table one column wider than the rest.
 _DELIM = re.compile(r"(?<!\\)\|")
 
+# Line classifiers, both indifferent to indentation.
+_FENCE = re.compile(r"^\s*```")
+_ROW = re.compile(r"^\s*\|")
+
+# The leading whitespace run. `\s*` can match empty, so this always matches and
+# `.group()` needs no None guard.
+_INDENT = re.compile(r"^\s*")
+
 
 def split_row(line: str) -> tuple[str, list[str]]:
     """Split one table row into its indent and its stripped cells."""
-    indent = line[: len(line) - len(line.lstrip())]
+    indent = _INDENT.match(line).group()
     body = line.strip()
     if body.startswith("|"):
         body = body[1:]
@@ -87,12 +100,12 @@ def align(text: str) -> str:
             block = []
 
     for line in text.split("\n"):
-        if line.lstrip().startswith("```"):
+        if _FENCE.match(line):
             flush()
             in_fence = not in_fence
             out.append(line)
             continue
-        if not in_fence and line.strip().startswith("|"):
+        if not in_fence and _ROW.match(line):
             row_indent, cells = split_row(line)
             if not block:
                 indent = row_indent
