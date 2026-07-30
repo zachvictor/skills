@@ -25,10 +25,10 @@ import argparse
 import json
 import re
 import sys
-import urllib.request
 import urllib.error
-from pathlib import Path
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # PyPI lookup
@@ -64,11 +64,25 @@ def batch_lookup(packages: list[str]) -> dict[str, str | None]:
 # Parsers — each returns list of (package_name, current_version_or_None)
 # ---------------------------------------------------------------------------
 
+# Shared fragments. Each is self-contained (grouped or anchored as needed) so
+# it can be concatenated into a larger pattern without changing that pattern's
+# grouping or precedence.
+_NAME = r"[A-Za-z0-9_][A-Za-z0-9._-]*"  # PEP 508 distribution name
+_EXTRAS = r"(?:\[.*?\])?"  # optional extras, e.g. [security]
+_OP = r"(?:[~=!<>^]=?|===?)"  # PEP 440 / Poetry comparison operator
+
+# TOML permits either quote style for strings, and ruff's quote-style='single'
+# emits single-quoted pyproject.toml files. Patterns that read or rewrite a TOML
+# string capture the opening quote as `q` and close on the `(?P=q)`
+# backreference, so a quote of one style can never be paired with the other.
+_QOPEN = r"(?P<q>['\"])"
+_QCLOSE = r"(?P=q)"
+_QBODY = r"[^'\"]*"  # string body — cannot cross a quote of either style
+
 # Matches lines like:  requests==2.31.0  or  flask>=2.0  or  pytest~=7.0
 _REQ_RE = re.compile(
-    r"^\s*([A-Za-z0-9_][A-Za-z0-9._-]*)"  # package name
-    r"\s*(?:\[.*?\])?"  # optional extras [security]
-    r"\s*([~=!<>^]=?|===?)?"  # operator (optional)
+    r"^\s*(" + _NAME + r")"  # package name
+    r"\s*" + _EXTRAS + r"\s*(" + _OP + r")?"  # extras, then optional operator
     r"\s*([0-9][0-9A-Za-z.*]*)?",  # version (optional)
     re.MULTILINE,
 )
@@ -164,28 +178,42 @@ _POETRY_DEP_SECTION_RE = re.compile(
     re.MULTILINE,
 )
 
+# PEP 621: dependencies = ["requests>=2.28", 'flask~=2.0']
+# These are string items inside arrays — safe to grab globally because only
+# dependency strings look like "package>=version" inside quotes.
+_PEP621_DEP_RE = re.compile(
+    _QOPEN + r"(?P<dep>" + _NAME + _EXTRAS + r"\s*" + _OP + r"\s*[0-9]" + _QBODY + r")"
+    r"" + _QCLOSE
+)
+
+# Poetry: key = "^2.28"  /  key = {version = '^2.28', ...}
+_POETRY_SIMPLE_RE = re.compile(
+    r"^(" + _NAME + r")\s*=\s*" + _QOPEN + r"(?P<ver>" + _QBODY + r")" + _QCLOSE
+)
+_POETRY_TABLE_RE = re.compile(
+    r"^("
+    + _NAME
+    + r")\s*=\s*\{[^}]*version\s*=\s*"
+    + _QOPEN
+    + r"(?P<ver>"
+    + _QBODY
+    + r")"
+    + _QCLOSE
+)
+
 
 def _parse_pyproject_toml_regex(path: Path) -> list[tuple[str, str | None]]:
     """Regex fallback for Python < 3.11 where tomllib is unavailable."""
     text = path.read_text()
     deps = []
 
-    # PEP 621: dependencies = ["requests>=2.28", "flask~=2.0"]
-    # These are string items inside arrays — safe to grab globally because
-    # only dependency strings look like "package>=version" inside quotes.
-    _PEP621_RE = (
-        r'"([A-Za-z0-9_][A-Za-z0-9._-]*'
-        r'(?:\[.*?\])?\s*(?:[~=!<>^]=?|===?)\s*[0-9][^"]*)"'
-    )
-    dep_strings = re.findall(_PEP621_RE, text)
-    for ds in dep_strings:
-        m = _REQ_RE.match(ds)
-        if m:
-            deps.append((m.group(1), m.group(3) or None))
+    for m in _PEP621_DEP_RE.finditer(text):
+        rm = _REQ_RE.match(m.group("dep"))
+        if rm:
+            deps.append((rm.group(1), rm.group(3) or None))
 
-    # Poetry: key = "^2.28" or key = {version = "^2.28", ...}
-    # Only match these inside Poetry dependency sections to avoid picking up
-    # config keys like requires-python, target-version, etc.
+    # Poetry deps are matched only inside Poetry dependency sections, to avoid
+    # picking up config keys like requires-python, target-version, etc.
     seen = {d[0].lower() for d in deps}
     lines = text.splitlines()
     in_poetry_deps = False
@@ -198,16 +226,9 @@ def _parse_pyproject_toml_regex(path: Path) -> list[tuple[str, str | None]]:
         if not in_poetry_deps:
             continue
 
-        # Match: package = "^1.0"
-        m_inline = re.match(r'^([A-Za-z0-9_][A-Za-z0-9._-]*)\s*=\s*"([^"]*)"', stripped)
-        if not m_inline:
-            # Match: package = {version = "^1.0", ...}
-            m_inline = re.match(
-                r'^([A-Za-z0-9_][A-Za-z0-9._-]*)\s*=\s*\{[^}]*version\s*=\s*"([^"]*)"',
-                stripped,
-            )
+        m_inline = _POETRY_SIMPLE_RE.match(stripped) or _POETRY_TABLE_RE.match(stripped)
         if m_inline:
-            name, ver_str = m_inline.group(1), m_inline.group(2)
+            name, ver_str = m_inline.group(1), m_inline.group("ver")
             if name.lower() in seen or name.lower() == "python":
                 continue
             ver = re.sub(r"[^0-9.]", "", ver_str).strip(".")
@@ -395,39 +416,138 @@ def update_requirements_txt(path: Path, updates: dict[str, str], operator: str):
     path.write_text("\n".join(new_lines) + "\n")
 
 
+# A TOML string, either style. Basic strings honour backslash escapes; literal
+# (single-quoted) strings do not. Used to blank out strings before counting
+# brackets, so that extras like "requests[security]" are not miscounted.
+_TOML_STRING_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+_TABLE_HEADER_RE = re.compile(r"^[ \t]*\[([^][]+)\][ \t]*(?:#.*)?$")
+_ARRAY_OPEN_RE = re.compile(r"^[ \t]*(?P<key>" + _NAME + r")[ \t]*=[ \t]*\[")
+
+# Tables in which *every* array-valued key holds dependency strings.
+_DEP_TABLES = frozenset({"project.optional-dependencies", "dependency-groups"})
+# (table, key) pairs that hold dependency strings.
+_DEP_KEYS = frozenset({("project", "dependencies"), ("tool.uv", "dev-dependencies")})
+
+
+def _bracket_delta(line: str) -> int:
+    """Net `[` minus `]` on a line, ignoring brackets inside strings/comments."""
+    bare = _TOML_STRING_RE.sub("", line).split("#")[0]
+    return bare.count("[") - bare.count("]")
+
+
+def _dep_array_spans(text: str) -> list[tuple[int, int]]:
+    """Return (start, end) offsets of the arrays that hold dependency strings.
+
+    Scoping matters for the unpinned case: a bare `"requests"` is a dependency
+    only inside one of these arrays. Everywhere else in a pyproject.toml the
+    same literal is a project name, a keyword, or a classifier, and rewriting
+    it to `"requests~=2.32.5"` would corrupt the file.
+    """
+    spans: list[tuple[int, int]] = []
+    table = ""
+    start: int | None = None
+    is_dep = False
+    depth = 0
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        end = offset + len(line)
+        if start is None:
+            header = _TABLE_HEADER_RE.match(line)
+            if header:
+                table = header.group(1).strip()
+                offset = end
+                continue
+            opener = _ARRAY_OPEN_RE.match(line)
+            if opener:
+                key = opener.group("key")
+                is_dep = table in _DEP_TABLES or (table, key) in _DEP_KEYS
+                start = offset
+                depth = _bracket_delta(line)
+        else:
+            depth += _bracket_delta(line)
+        if start is not None and depth <= 0:
+            if is_dep:
+                spans.append((start, end))
+            start, is_dep, depth = None, False, 0
+        offset = end
+    if start is not None and is_dep:  # unterminated array — take the rest
+        spans.append((start, len(text)))
+    return spans
+
+
 def update_pyproject_toml(path: Path, updates: dict[str, str], operator: str):
-    """Rewrite pyproject.toml dependency version strings."""
+    """Rewrite pyproject.toml dependency version strings.
+
+    Handles PEP 621 arrays (including entries that carry no version yet) and
+    both Poetry spellings, in either quote style.
+    """
     text = path.read_text()
 
-    # Update PEP 621 style: "package>=1.0" → "package~=2.0"
+    # Unpinned PEP 621 entries: 'requests' → 'requests~=2.32.5'. Restricted to
+    # dependency arrays (see _dep_array_spans) and to complete array elements,
+    # so neither a stray literal nor a `{include-group = "dev"}` table is hit.
+    # Spans are applied right-to-left so earlier offsets stay valid as text grows.
+    for start, end in reversed(_dep_array_spans(text)):
+        segment = text[start:end]
+        for pkg, ver in updates.items():
+            unpinned = re.compile(
+                r"(?<=[\[,])(?P<lead>\s*)"
+                + _QOPEN
+                + r"(?P<name>"
+                + re.escape(pkg)
+                + _EXTRAS
+                + r")"
+                + _QCLOSE,
+                re.IGNORECASE,
+            )
+            segment = unpinned.sub(
+                lambda m, v=ver: (
+                    f"{m['lead']}{m['q']}{m['name']}{operator}{v}{m['q']}"
+                ),
+                segment,
+            )
+        text = text[:start] + segment + text[end:]
+
     for pkg, ver in updates.items():
-        # Match "pkg(extras)?OP version" inside quotes
-        pattern = re.compile(
-            r'("'
+        # PEP 621 style: 'pkg[extras]>=1.0' or "pkg[extras]>=1.0"
+        pinned = re.compile(
+            _QOPEN
+            + r"(?P<name>"
             + re.escape(pkg)
-            + r'(?:\[.*?\])?\s*)([~=!<>^]=?|===?)(\s*[0-9][^"]*")',
+            + _EXTRAS
+            + r"\s*)"
+            + _OP
+            + r"\s*[0-9]"
+            + _QBODY
+            + _QCLOSE,
             re.IGNORECASE,
         )
-        if pattern.search(text):
-            text = pattern.sub(lambda m: m.group(1) + operator + ver + '"', text)
+        if pinned.search(text):
+            text = pinned.sub(
+                lambda m, v=ver: f"{m['q']}{m['name']}{operator}{v}{m['q']}",
+                text,
+            )
         else:
-            # Poetry style: pkg = "^1.0"  → pkg = "~=2.0"
-            pattern2 = re.compile(
-                r"^(" + re.escape(pkg) + r'\s*=\s*")([^"]*)(")',
+            # Poetry simple: pkg = "^1.0" or pkg = '^1.0'
+            simple = re.compile(
+                r"^(" + re.escape(pkg) + r"\s*=\s*)" + _QOPEN + _QBODY + _QCLOSE,
                 re.MULTILINE | re.IGNORECASE,
             )
-            text = pattern2.sub(
-                lambda m: m.group(1) + operator + ver + m.group(3), text
-            )
-
-            # Poetry table style: pkg = {version = "^1.0", ...}
-            pattern3 = re.compile(
-                r"^(" + re.escape(pkg) + r'\s*=\s*\{[^}]*version\s*=\s*")([^"]*)(")',
+            # Poetry table: pkg = {version = "^1.0", ...} (either quote style)
+            table = re.compile(
+                r"^("
+                + re.escape(pkg)
+                + r"\s*=\s*\{[^}]*version\s*=\s*)"
+                + _QOPEN
+                + _QBODY
+                + _QCLOSE,
                 re.MULTILINE | re.IGNORECASE,
             )
-            text = pattern3.sub(
-                lambda m: m.group(1) + operator + ver + m.group(3), text
-            )
+            for pattern in (simple, table):
+                text = pattern.sub(
+                    lambda m, v=ver: f"{m.group(1)}{m['q']}{operator}{v}{m['q']}",
+                    text,
+                )
 
     path.write_text(text)
 
@@ -437,10 +557,10 @@ def update_setup_cfg(path: Path, updates: dict[str, str], operator: str):
     text = path.read_text()
     for pkg, ver in updates.items():
         pattern = re.compile(
-            r"(" + re.escape(pkg) + r"(?:\[.*?\])?\s*)([~=!<>^]=?|===?)(\s*[0-9]\S*)",
+            r"(" + re.escape(pkg) + _EXTRAS + r"\s*)" + _OP + r"\s*[0-9]\S*",
             re.IGNORECASE,
         )
-        text = pattern.sub(lambda m: m.group(1) + operator + ver, text)
+        text = pattern.sub(lambda m, v=ver: m.group(1) + operator + v, text)
     path.write_text(text)
 
 
@@ -450,13 +570,19 @@ def update_setup_py(path: Path, updates: dict[str, str], operator: str):
     for pkg, ver in updates.items():
         # Match inside quoted strings
         pattern = re.compile(
-            r"""(['"])("""
+            _QOPEN
+            + r"(?P<name>"
             + re.escape(pkg)
-            + r"""(?:\[.*?\])?\s*)([~=!<>^]=?|===?)(\s*[0-9][^'"]*['"])""",
+            + _EXTRAS
+            + r"\s*)"
+            + _OP
+            + r"\s*[0-9]"
+            + _QBODY
+            + _QCLOSE,
             re.IGNORECASE,
         )
         text = pattern.sub(
-            lambda m: m.group(1) + m.group(2) + operator + ver + m.group(1),
+            lambda m, v=ver: f"{m['q']}{m['name']}{operator}{v}{m['q']}",
             text,
         )
     path.write_text(text)
@@ -479,8 +605,8 @@ def update_pipfile(path: Path, updates: dict[str, str], operator: str):
                 elif "= {" in line:
                     # Table inline — update version inside
                     new_line = re.sub(
-                        r'(version\s*=\s*["\'])([^"\']*)',
-                        lambda m: m.group(1) + operator + ver,
+                        r"(version\s*=\s*)" + _QOPEN + _QBODY + _QCLOSE,
+                        lambda m, v=ver: f"{m.group(1)}{m['q']}{operator}{v}{m['q']}",
                         line,
                     )
                     new_lines.append(new_line)
@@ -496,12 +622,10 @@ def update_conda_env(path: Path, updates: dict[str, str], operator: str):
     text = path.read_text()
     for pkg, ver in updates.items():
         pattern = re.compile(
-            r"(-\s+"
-            + re.escape(pkg)
-            + r"(?:\[.*?\])?\s*)([~=!<>^]=?|===?)(\s*[0-9]\S*)",
+            r"(-\s+" + re.escape(pkg) + _EXTRAS + r"\s*)" + _OP + r"\s*[0-9]\S*",
             re.IGNORECASE,
         )
-        text = pattern.sub(lambda m: m.group(1) + operator + ver, text)
+        text = pattern.sub(lambda m, v=ver: m.group(1) + operator + v, text)
     path.write_text(text)
 
 
