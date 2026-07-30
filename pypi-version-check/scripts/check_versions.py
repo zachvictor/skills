@@ -624,20 +624,22 @@ def update_pipfile(path: Path, updates: dict[str, str], operator: str):
         replaced = False
         for pkg, ver in updates.items():
             if line.strip().lower().startswith(pkg.lower()):
-                # Preserve quoting style
-                if '= "' in line or "= '" in line:
-                    q = '"' if '"' in line else "'"
-                    new_lines.append(f"{pkg} = {q}{operator}{ver}{q}")
-                    replaced = True
-                    break
-                elif "= {" in line:
-                    # Table inline — update version inside
+                # Inline table first: `pkg = {version = "1.0"}` also contains
+                # `= "`, so testing for the simple form first would flatten the
+                # table and drop its other keys.
+                if "= {" in line:
                     new_line = re.sub(
                         r"(version\s*=\s*)" + _QOPEN + _QBODY + _QCLOSE,
                         lambda m, v=ver: f"{m.group(1)}{m['q']}{operator}{v}{m['q']}",
                         line,
                     )
                     new_lines.append(new_line)
+                    replaced = True
+                    break
+                elif '= "' in line or "= '" in line:
+                    # Preserve quoting style
+                    q = '"' if '"' in line else "'"
+                    new_lines.append(f"{pkg} = {q}{operator}{ver}{q}")
                     replaced = True
                     break
         if not replaced:

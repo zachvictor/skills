@@ -392,10 +392,23 @@ def test_conda_env_round_trip(tmp_path):
 
 def test_pipfile_round_trip(tmp_path):
     path = tmp_path / "Pipfile"
-    path.write_text('[packages]\nrequests = "==2.28.0"\n')
-    assert cv.parse_pipfile(path) == [("requests", "2.28.0")]
+    path.write_text(
+        "[packages]\nrequests = \"==2.28.0\"\nflask = {version = '==2.0.1'}\n"
+    )
+    assert cv.parse_pipfile(path) == [("requests", "2.28.0"), ("flask", "2.0.1")]
     cv.update_pipfile(path, UPDATES, "~=")
-    assert path.read_text() == '[packages]\nrequests = "~=2.32.5"\n'
+    assert path.read_text() == (
+        "[packages]\nrequests = \"~=2.32.5\"\nflask = {version = '~=3.1.0'}\n"
+    )
+
+
+def test_pipfile_inline_table_keeps_its_other_keys(tmp_path):
+    path = tmp_path / "Pipfile"
+    path.write_text('[packages]\nrequests = {version = "==2.28.0", extras = ["s"]}\n')
+    cv.update_pipfile(path, UPDATES, "~=")
+    assert path.read_text() == (
+        '[packages]\nrequests = {version = "~=2.32.5", extras = ["s"]}\n'
+    )
 
 
 def test_detect_parser_routing():
