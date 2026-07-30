@@ -16,6 +16,11 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Skill scripts are not importable packages — each skill directory is
+# self-contained for distribution. Declaring the script directories here (paths
+# are relative to rootdir) lets the tests import them by module name without a
+# conftest.py mutating sys.path at collection time.
+pythonpath = ["markdown-format/scripts", "pypi-version-check/scripts"]
 
 [tool.ruff]
 line-length = 88
