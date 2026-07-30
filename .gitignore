@@ -4,4 +4,5 @@
 .ruff_cache/
 .venv/
 CLAUDE.md
+__pycache__/
 tmp/
