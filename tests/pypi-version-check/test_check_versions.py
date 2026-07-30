@@ -245,6 +245,92 @@ def test_poetry_table_scoping_ends_at_the_next_header(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Poetry entries carrying no version constraint. `pkg = "*"` used to be dropped
+# by the parser, so it never reached the updater to be pinned. Entries sourced
+# from somewhere other than PyPI stay dropped — there is no release to compare
+# against, and reporting them would only promise a pin that cannot happen.
+# ---------------------------------------------------------------------------
+
+POETRY_DEP_CASES = [
+    pytest.param('requests = "^2.28.0"', [("requests", "2.28.0")], id="pinned"),
+    pytest.param("requests = '^2.28.0'", [("requests", "2.28.0")], id="pinned-single"),
+    pytest.param('requests = "*"', [("requests", None)], id="star"),
+    pytest.param("requests = '*'", [("requests", None)], id="star-single-quoted"),
+    pytest.param('requests = {version = "*"}', [("requests", None)], id="table-star"),
+    pytest.param(
+        "requests = {version = '*', extras = ['socks']}",
+        [("requests", None)],
+        id="table-star-with-extras",
+    ),
+    pytest.param('requests = {git = "https://e.com/r.git"}', [], id="git-source"),
+    pytest.param('requests = {path = "../requests"}', [], id="path-source"),
+    pytest.param('requests = {url = "https://e.com/r.whl"}', [], id="url-source"),
+    pytest.param(
+        'requests = [{version = "^1.0", python = "<3.11"},'
+        ' {version = "^2.0", python = ">=3.11"}]',
+        [],
+        id="multiple-constraints",
+    ),
+]
+
+
+@pytest.mark.parametrize(("line", "expected"), POETRY_DEP_CASES)
+def test_poetry_dependency_version_extraction(tmp_path, line, expected):
+    path = tmp_path / "pyproject.toml"
+    path.write_text(f"[tool.poetry.dependencies]\npython = '^3.11'\n{line}\n")
+    assert cv.parse_pyproject_toml(path) == expected
+
+
+@pytest.mark.parametrize(("line", "expected"), POETRY_DEP_CASES)
+def test_regex_fallback_agrees_on_poetry_dependency_shapes(tmp_path, line, expected):
+    path = tmp_path / "pyproject.toml"
+    path.write_text(f"[tool.poetry.dependencies]\npython = '^3.11'\n{line}\n")
+    assert cv._parse_pyproject_toml_regex(path) == expected
+
+
+def test_unpinned_poetry_dependency_gets_pinned(tmp_path):
+    src = "[tool.poetry.dependencies]\npython = '^3.11'\nrequests = '*'\n"
+    assert update(tmp_path, src) == (
+        "[tool.poetry.dependencies]\npython = '^3.11'\nrequests = '~=2.32.5'\n"
+    )
+
+
+def test_unpinned_poetry_table_keeps_its_other_keys(tmp_path):
+    src = '[tool.poetry.dependencies]\nrequests = {version = "*", extras = ["socks"]}\n'
+    assert update(tmp_path, src) == (
+        '[tool.poetry.dependencies]\nrequests = {version = "~=2.32.5",'
+        ' extras = ["socks"]}\n'
+    )
+
+
+def test_unpinned_poetry_group_dependency_gets_pinned(tmp_path):
+    src = '[tool.poetry.group.dev.dependencies]\npytest = "*"\n'
+    assert update(tmp_path, src) == (
+        '[tool.poetry.group.dev.dependencies]\npytest = "~=8.4.0"\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param('requests = {git = "https://e.com/r.git"}', id="git-source"),
+        pytest.param('requests = {path = "../requests"}', id="path-source"),
+    ],
+)
+def test_non_pypi_poetry_dependency_is_left_alone(tmp_path, line):
+    src = f"[tool.poetry.dependencies]\n{line}\n"
+    assert update(tmp_path, src) == src
+
+
+def test_python_constraint_is_never_reported_or_rewritten(tmp_path):
+    src = "[tool.poetry.dependencies]\npython = '*'\n"
+    path = tmp_path / "pyproject.toml"
+    path.write_text(src)
+    assert cv.parse_pyproject_toml(path) == []
+    assert update(tmp_path, src) == src
+
+
+# ---------------------------------------------------------------------------
 # Dependency-array scoping
 # ---------------------------------------------------------------------------
 

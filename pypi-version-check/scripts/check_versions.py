@@ -101,22 +101,37 @@ def parse_requirements_txt(path: Path) -> list[tuple[str, str | None]]:
     return deps
 
 
+# Poetry dependency table keys that name a source other than PyPI. Such a
+# dependency has no PyPI release to compare against, so it is skipped rather
+# than reported as unpinned — the caller would only fail to pin it.
+_POETRY_NON_PYPI_KEYS = frozenset({"git", "path", "url"})
+
+
 def _parse_poetry_deps(
     section: dict,
 ) -> list[tuple[str, str | None]]:
-    """Extract (name, version) pairs from a Poetry dependency mapping."""
+    """Extract (name, version) pairs from a Poetry dependency mapping.
+
+    A dependency carrying no version constraint — `pkg = "*"`, or a table
+    whose version is "*" — yields None, matching how an unpinned PEP 621
+    entry is reported, so the caller pins it rather than dropping it.
+    """
     deps = []
     for name, val in section.items():
         if name.lower() == "python":
             continue
-        ver_str = (
-            val
-            if isinstance(val, str)
-            else (val.get("version", "") if isinstance(val, dict) else "")
-        )
+        if isinstance(val, str):
+            ver_str = val
+        elif isinstance(val, dict):
+            if _POETRY_NON_PYPI_KEYS & val.keys():
+                continue
+            ver_str = val.get("version", "")
+        else:
+            # A list means multiple constraints keyed by python/platform marker.
+            # Which one to bump is ambiguous, so leave the whole entry alone.
+            continue
         ver = re.sub(r"[^0-9.]", "", ver_str).strip(".")
-        if ver:
-            deps.append((name, ver))
+        deps.append((name, ver or None))
     return deps
 
 
@@ -226,15 +241,16 @@ def _parse_pyproject_toml_regex(path: Path) -> list[tuple[str, str | None]]:
         if not in_poetry_deps:
             continue
 
+        # Both patterns require a quoted version string, so a git/path/url
+        # dependency has nothing for them to match and is skipped here too.
         m_inline = _POETRY_SIMPLE_RE.match(stripped) or _POETRY_TABLE_RE.match(stripped)
         if m_inline:
             name, ver_str = m_inline.group(1), m_inline.group("ver")
             if name.lower() in seen or name.lower() == "python":
                 continue
             ver = re.sub(r"[^0-9.]", "", ver_str).strip(".")
-            if ver:
-                deps.append((name, ver))
-                seen.add(name.lower())
+            deps.append((name, ver or None))
+            seen.add(name.lower())
 
     return deps
 
