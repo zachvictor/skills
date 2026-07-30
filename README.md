@@ -7,6 +7,7 @@ Agent skills for use with agentic coding tools. These skills follow the [Agent S
 | Skill                                       | Description                                                                                                                                                                                         |
 |---------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | [commit-msg](./commit-msg/)                 | Composes a [Conventional Commits](https://www.conventionalcommits.org/) message for staged changes, appends it to `tmp/commit-msgs.txt`, and copies it to the clipboard.                            |
+| [markdown-format](./markdown-format/)       | Formats Markdown source without reflowing prose. Aligns table columns, leaving paragraphs, fenced code blocks, alignment colons, and indentation byte identical.                                    |
 | [pypi-version-check](./pypi-version-check/) | Checks Python dependencies against PyPI to ensure versions are current before committing. Supports `requirements.txt`, `pyproject.toml`, `setup.cfg`, `setup.py`, `Pipfile`, and `environment.yml`. |
 
 ## Installation
