@@ -525,12 +525,12 @@ def format_table(rows: list[tuple[str, str, str, str]]) -> str:
     if not rows:
         return "  (no dependencies found)"
     headers = ("Package", "Current", "Latest", "Status")
-    widths = [max(len(r[i]) for r in [headers] + rows) for i in range(4)]
+    widths = [max(len(r[i]) for r in [headers, *rows]) for i in range(4)]
     sep = "  ".join("-" * w for w in widths)
-    hdr = "  ".join(h.ljust(w) for h, w in zip(headers, widths))
+    hdr = "  ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True))
     lines = [hdr, sep]
     for row in rows:
-        lines.append("  ".join(val.ljust(w) for val, w in zip(row, widths)))
+        lines.append("  ".join(v.ljust(w) for v, w in zip(row, widths, strict=True)))
     return "\n".join(lines)
 
 
