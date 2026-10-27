@@ -1,0 +1,42 @@
+# Defaults for the jira-ticket skill. Copy to ~/.claude/jira-ticket.toml
+# (or point $JIRA_TICKET_CONFIG at it) and replace the example values.
+#
+# The skill picks a profile in this order:
+#
+# 1. --profile on the command line
+# 2. the profile whose gitlab_paths match the origin remote of the repo, by
+#    whole path segments: "acme/platform/data" matches
+#    "acme/platform/data/etl" but not "acme/platform/data-archive". The
+#    longest match wins.
+# 3. default_profile
+
+# The Jira Cloud site, used to print ticket links.
+site = "acme.atlassian.net"
+default_profile = "platform-data"
+
+[project.ACME]
+# Work item types in use. `create --type` and `update --type` accept these in
+# any case and refuse others. A profile's type must be one of them.
+types = ["Task", "Bug"]
+# Status names exactly as Jira spells them. `transition` accepts these in any
+# case and refuses others unless given --any. Comments here are the place to
+# say when each status applies; the skill reads them.
+statuses = [
+  "To Do",
+  "In Progress",
+  "In Review",  # MR open
+  "Done",
+]
+
+[profile.platform-data]
+project = "ACME"
+type = "Task"           # optional; defaults to "Task"
+assignee = "@me"        # an email, an account ID, or @me
+parent = "ACME-100"     # the epic new tickets go under
+labels = ["data"]
+gitlab_paths = ["acme/platform/data"]
+
+# No parent and no labels. Select it with --profile acme.
+[profile.acme]
+project = "ACME"
+assignee = "@me"
