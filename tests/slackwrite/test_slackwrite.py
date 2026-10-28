@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -6,10 +7,47 @@ import slackwrite as sw
 
 GROUP = "https://gitlab.com/acme/platform/data"
 SITE = "acme.atlassian.net"
+REPO = sw.Repo(Path("/r"), "gitlab.com", "acme/platform/data/query-api", "feat/2")
 
 
 def mr(iid: int, title: str, key: str | None, repo: str = "query-api") -> sw.MR:
-    return sw.MR(iid, f"{GROUP}/{repo}/-/merge_requests/{iid}", title, key, False)
+    url = f"{GROUP}/{repo}/-/merge_requests/{iid}"
+    return sw.MR(iid, url, title, key, False, f"feat/{iid}", "develop")
+
+
+def url(iid: int, project: str = REPO.path) -> str:
+    return f"https://gitlab.com/{project}/-/merge_requests/{iid}"
+
+
+def ref(iid: int) -> sw.Ref:
+    return sw.Ref(f"!{iid}", url(iid))
+
+
+def node(
+    iid: int, target: str = "develop", blockers: tuple = (), hidden: int = 0
+) -> dict:
+    """A GraphQL `mr` fragment, as GitLab returns it."""
+    return {
+        "iid": str(iid),
+        "webUrl": url(iid),
+        "title": f"feat: change {iid} (ACME-{iid})",
+        "draft": False,
+        "sourceBranch": f"feat/{iid}",
+        "targetBranch": target,
+        "blockingMergeRequests": {
+            "hiddenCount": hidden,
+            "visibleMergeRequests": list(blockers),
+        },
+    }
+
+
+def blocker(iid: int, state: str = "opened", project: str = REPO.path) -> dict:
+    return {
+        "iid": str(iid),
+        "webUrl": url(iid, project),
+        "state": state,
+        "project": {"fullPath": project},
+    }
 
 
 # --- parse_remote ------------------------------------------------------------
@@ -115,6 +153,182 @@ def test_render_many_mrs():
         "\n"
         "_Please review_"
     )
+
+
+def test_render_one_mr_puts_each_note_on_a_line():
+    text = sw.render_mr("query-api", [mr(5, "chore: tidy", None)], SITE, ["A.", "B."])
+    assert text.splitlines()[2:] == ["A.  ", "B.  ", "_Please review_"]
+
+
+def test_render_many_mrs_puts_each_note_in_a_paragraph():
+    mrs = [mr(5, "chore: tidy", None), mr(6, "fix: bug", None)]
+    text = sw.render_mr("query-api", mrs, SITE, ["A.", "B."])
+    assert text.endswith("fix: bug\n\nA.\n\nB.\n\n_Please review_")
+
+
+# --- GraphQL -----------------------------------------------------------------
+
+
+def test_graphql_sends_the_query_to_the_repo_host(monkeypatch):
+    calls = []
+
+    def fake_run(*cmd, stdin=None):
+        calls.append((cmd, json.loads(stdin)))
+        return '{"data": {"project": {"id": 1}}}'
+
+    monkeypatch.setattr(sw, "run", fake_run)
+    assert sw.graphql(REPO, "query", path=REPO.path) == {"project": {"id": 1}}
+    [(cmd, body)] = calls
+    assert cmd[:5] == ("glab", "api", "graphql", "--hostname", "gitlab.com")
+    assert body == {"query": "query", "variables": {"path": REPO.path}}
+
+
+def test_graphql_reports_a_project_that_the_user_cannot_see(monkeypatch):
+    monkeypatch.setattr(sw, "run", lambda *a, **k: '{"data": {"project": null}}')
+    with pytest.raises(sw.SlackwriteError, match="no project"):
+        sw.graphql(REPO, "query")
+
+
+# --- parse_mr ----------------------------------------------------------------
+
+
+def test_parse_mr():
+    assert sw.parse_mr(node(7, target="feat/6"), REPO) == sw.MR(
+        7, url(7), "feat: change 7", "ACME-7", False, "feat/7", "feat/6"
+    )
+
+
+def test_parse_mr_keeps_the_unmerged_blockers():
+    blockers = (
+        blocker(5),
+        blocker(6, "merged"),
+        blocker(7, "closed"),
+        blocker(8, project="acme/other"),
+    )
+    parsed = sw.parse_mr(node(9, blockers=blockers), REPO)
+    assert [b.label for b in parsed.blockers] == ["!5", "!7", "acme/other!8"]
+    assert parsed.blockers[2].url == url(8, "acme/other")
+
+
+def test_parse_mr_warns_about_hidden_blockers(capsys):
+    sw.parse_mr(node(9, hidden=2), REPO)
+    assert "!9 has 2 blocking MRs that you cannot see" in capsys.readouterr().err
+
+
+# --- base branches -----------------------------------------------------------
+
+PROJECT = {
+    "repository": {"rootRef": "main"},
+    "branchRules": {
+        "nodes": [
+            {"name": "All branches", "isProtected": False},
+            {"name": "develop", "isProtected": True},
+            {"name": "release/*", "isProtected": True},
+            {"name": "v1.*", "isProtected": True},
+        ]
+    },
+}
+
+
+def test_base_branches_are_the_default_and_the_protected():
+    assert sw.base_branches(PROJECT) == ["main", "develop", "release/*", "v1.*"]
+
+
+@pytest.mark.parametrize(
+    ("branch", "expected"),
+    [
+        ("main", True),
+        ("develop", True),
+        ("release/1.2", True),
+        ("release/1.2/fix", True),
+        ("v1.2", True),
+        ("v12", False),
+        ("release", False),
+        ("feat/release/1", False),
+        ("developer", False),
+    ],
+)
+def test_is_base(branch, expected):
+    assert sw.is_base(branch, sw.base_branches(PROJECT)) is expected
+
+
+# --- stack_parents -----------------------------------------------------------
+
+
+def test_stack_parents_does_not_query_for_base_targets(monkeypatch):
+    monkeypatch.setattr(sw, "graphql", lambda *a, **k: pytest.fail("queried"))
+    assert sw.stack_parents(REPO, [mr(1, "x", None)], ["develop"]) == {}
+
+
+def test_stack_parents_queries_each_other_target_once(monkeypatch):
+    calls = []
+
+    def fake_graphql(repo, query, **variables):
+        calls.append(variables)
+        nodes = [{"iid": "1", "webUrl": url(1), "sourceBranch": "feat/1"}]
+        return {"project": {"mergeRequests": {"nodes": nodes}}}
+
+    monkeypatch.setattr(sw, "graphql", fake_graphql)
+    mrs = [
+        sw.parse_mr(node(2, target="feat/1"), REPO),
+        sw.parse_mr(node(3, target="feat/1"), REPO),
+        sw.parse_mr(node(4), REPO),
+    ]
+    assert sw.stack_parents(REPO, mrs, ["develop"]) == {"feat/1": [ref(1)]}
+    assert calls == [{"path": REPO.path, "branches": ["feat/1"]}]
+
+
+# --- dependencies and render_order -------------------------------------------
+
+
+def test_dependencies_state_stacks_then_blocks():
+    one = sw.parse_mr(node(1), REPO)
+    # !2 is stacked on !1 and also blocked by it: one dependency, not two.
+    two = sw.parse_mr(node(2, "feat/1", (blocker(1), blocker(9))), REPO)
+    three = sw.parse_mr(node(3, blockers=(blocker(2),)), REPO)
+    deps = sw.dependencies([one, two, three], {"feat/1": [ref(1)]})
+    assert deps == [
+        sw.Dep(ref(2), sw.STACKED, ref(1)),
+        sw.Dep(ref(2), sw.BLOCKED, ref(9)),
+        sw.Dep(ref(3), sw.BLOCKED, ref(2)),
+    ]
+
+
+def link(iid: int) -> str:
+    return f"[!{iid}]({url(iid)})"
+
+
+def test_render_order_for_many_mrs():
+    mrs = [sw.parse_mr(node(i), REPO) for i in (12, 13, 14, 15)]
+    deps = [
+        sw.Dep(ref(12), sw.BLOCKED, ref(15)),
+        sw.Dep(ref(13), sw.STACKED, ref(12)),
+    ]
+    assert sw.render_order(mrs, deps) == (
+        f"Start with {link(15)}. {link(12)} is blocked by {link(15)}."
+        f" {link(13)} is stacked on {link(12)}."
+    )
+
+
+def test_render_order_starts_only_with_listed_mrs():
+    mrs = [sw.parse_mr(node(i), REPO) for i in (1, 2)]
+    deps = [sw.Dep(ref(2), sw.BLOCKED, ref(9))]
+    assert sw.render_order(mrs, deps) == f"{link(2)} is blocked by {link(9)}."
+
+
+def test_render_order_for_one_mr():
+    deps = [
+        sw.Dep(ref(2), sw.STACKED, ref(1)),
+        sw.Dep(ref(2), sw.BLOCKED, ref(9)),
+    ]
+    mrs = [sw.parse_mr(node(2), REPO)]
+    assert sw.render_order(mrs, deps) == (
+        f"Stacked on {link(1)}. Blocked by {link(9)}."
+    )
+
+
+def test_render_order_without_dependencies():
+    assert sw.render_order([sw.parse_mr(node(1), REPO)], []) == ""
 
 
 # --- draft_path --------------------------------------------------------------
