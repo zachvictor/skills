@@ -17,8 +17,10 @@ gives the GitLab host and project path. `glab` supplies the MR data and auth.
 An `mr` message states the merge order that GitLab records. An MR is stacked
 on an open MR whose source branch it targets, unless that branch is the
 default branch or a protected branch. An MR is blocked by each unmerged MR
-that GitLab lists as its dependency. --note adds a sentence for an order that
-GitLab does not record.
+that GitLab lists as its dependency. --after adds an order that GitLab does
+not record, and --note adds a sentence, such as the reason for that order.
+The list of MRs follows the merge order: by MR number, with each MR moved
+after the listed MRs that it waits for.
 
 The draft goes to tmp/<title>_<KEY>/slack-<type>.md when the message is about
 one ticket and that ticket directory exists, else to
@@ -58,9 +60,20 @@ _REMOTE = re.compile(
 # A ticket key in parentheses at the end of an MR title: "feat(x): y (ACME-1)".
 _TITLE_KEY = re.compile(r"^(?P<title>.*?)\s*\((?P<key>[A-Z][A-Z0-9_]*-\d+)\)\s*$")
 
-# The kinds of merge order, as the message words them.
-STACKED = "stacked on"
-BLOCKED = "blocked by"
+# The kinds of merge order, and how a sentence words each: about one of many
+# MRs, and in the message about one MR.
+STACKED = "stacked"
+BLOCKED = "blocked"
+AFTER = "after"
+ORDER_VERBS = {
+    STACKED: ("is stacked on", "Stacked on"),
+    BLOCKED: ("is blocked by", "Blocked by"),
+    AFTER: ("merges after", "Merges after"),
+}
+# An --after value: "13:12" or "!13:!12", for "!13 merges after !12".
+_AFTER = re.compile(r"^!?(?P<mr>\d+):!?(?P<on>\d+)$")
+# The MR number at the end of an MR's URL.
+_URL_IID = re.compile(r"/\d+$")
 
 
 # --- templates ---------------------------------------------------------------
@@ -75,8 +88,8 @@ MR_LINE = "- [!{iid}]({url}) {title}{jira}"
 JIRA_REF = " ([{key}]({url}))"
 MR_REF = "[{label}]({url})"
 ORDER_START = "Start with {refs}."
-ORDER_ONE = "{kind} {on}."
-ORDER_MANY = "{mr} is {kind} {on}."
+ORDER_ONE = "{verb} {on}."
+ORDER_MANY = "{mr} {verb} {on}."
 
 
 # --- GitLab GraphQL ----------------------------------------------------------
@@ -180,7 +193,7 @@ class Dep:
     """`mr` waits for `on` to merge."""
 
     mr: Ref
-    kind: str  # STACKED or BLOCKED
+    kind: str  # STACKED, BLOCKED, or AFTER
     on: Ref
 
 
@@ -336,6 +349,57 @@ def dependencies(mrs: list[MR], parents: dict[str, list[Ref]]) -> list[Dep]:
     return deps
 
 
+def after_deps(
+    mrs: list[MR], deps: list[Dep], pairs: Sequence[tuple[int, int]]
+) -> list[Dep]:
+    """Return a Dep for each --after pair that `deps` does not already state."""
+    listed = {mr.iid: mr.ref for mr in mrs}
+    stated = {(d.mr, d.on) for d in deps}
+    added = []
+    for iid, on_iid in pairs:
+        if iid not in listed:
+            raise SlackwriteError(f"--after {iid}:{on_iid}: !{iid} is not listed")
+        # An MR outside the message gets a URL in the shape of a listed MR's.
+        on = listed.get(on_iid) or Ref(
+            f"!{on_iid}", _URL_IID.sub(f"/{on_iid}", mrs[0].url)
+        )
+        if (listed[iid], on) in stated:
+            warn(f"--after {iid}:{on_iid}: the message already states this order")
+            continue
+        stated.add((listed[iid], on))
+        added.append(Dep(listed[iid], AFTER, on))
+    return added
+
+
+def merge_order(mrs: list[MR], deps: list[Dep]) -> list[MR]:
+    """Return `mrs` by MR number, each moved after the listed MRs it waits for."""
+    by_ref = {mr.ref: mr for mr in mrs}
+    waits: dict[Ref, list[Ref]] = {mr.ref: [] for mr in mrs}
+    for d in deps:
+        if d.on in by_ref:
+            waits[d.mr].append(d.on)
+    ordered: list[MR] = []
+    visiting: set[Ref] = set()
+
+    def place(ref: Ref) -> None:
+        visiting.add(ref)
+        for on in sorted(waits[ref], key=lambda r: by_ref[r].iid):
+            if on in visiting:
+                warn(
+                    f"the merge order has a cycle at {ref.label} -> {on.label}; "
+                    "the list ignores that step"
+                )
+            elif by_ref[on] not in ordered:
+                place(on)
+        visiting.discard(ref)
+        ordered.append(by_ref[ref])
+
+    for mr in mrs:
+        if mr not in ordered:
+            place(mr.ref)
+    return ordered
+
+
 def jira_site() -> str:
     override = os.environ.get(JIRA_CONFIG_ENV)
     path = Path(override).expanduser() if override else DEFAULT_JIRA_CONFIG
@@ -353,11 +417,15 @@ def jira_site() -> str:
 
 
 def render_order(mrs: list[MR], deps: list[Dep]) -> str:
-    """Return the sentences that state `deps`, or "" when there are none."""
+    """Return the sentences that state `deps`, in the order of `mrs`.
+
+    Return "" when there are no deps.
+    """
     if len(mrs) == 1:
         return " ".join(
-            ORDER_ONE.format(kind=d.kind.capitalize(), on=d.on.link()) for d in deps
+            ORDER_ONE.format(verb=ORDER_VERBS[d.kind][1], on=d.on.link()) for d in deps
         )
+    position = {mr.ref: i for i, mr in enumerate(mrs)}
     waiting = {d.mr for d in deps}
     waited_on = {d.on for d in deps}
     starts = [mr.ref for mr in mrs if mr.ref in waited_on and mr.ref not in waiting]
@@ -365,7 +433,8 @@ def render_order(mrs: list[MR], deps: list[Dep]) -> str:
     if starts:
         sentences.append(ORDER_START.format(refs=", ".join(r.link() for r in starts)))
     sentences += [
-        ORDER_MANY.format(mr=d.mr.link(), kind=d.kind, on=d.on.link()) for d in deps
+        ORDER_MANY.format(mr=d.mr.link(), verb=ORDER_VERBS[d.kind][0], on=d.on.link())
+        for d in sorted(deps, key=lambda d: position[d.mr])
     ]
     return " ".join(sentences)
 
@@ -428,11 +497,24 @@ def cmd_mr(args: argparse.Namespace) -> int:
         if mr.draft:
             warn(f"!{mr.iid} is a draft")
     deps = dependencies(mrs, stack_parents(repo, mrs, base))
+    deps += after_deps(mrs, deps, args.after)
+    mrs = merge_order(mrs, deps)
     notes = [n for n in (render_order(mrs, deps), (args.note or "").strip()) if n]
     text = render_mr(repo.name, mrs, jira_site(), notes)
     key = mrs[0].key if len(mrs) == 1 else None
     deliver(text, draft_path(repo.root, "mr", key))
     return 0
+
+
+def after_pair(text: str) -> tuple[int, int]:
+    """Parse an --after value into the MR that waits and the MR it waits for."""
+    m = _AFTER.match(text)
+    pair = (int(m["mr"]), int(m["on"])) if m else None
+    if pair is None or pair[0] == pair[1]:
+        raise argparse.ArgumentTypeError(
+            f"expected A:B with two different MR numbers, such as 13:12; got {text!r}"
+        )
+    return pair
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -447,10 +529,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "not only the MR for the current branch",
     )
     sp_mr.add_argument(
+        "--after",
+        action="append",
+        default=[],
+        type=after_pair,
+        metavar="A:B",
+        help="!A merges after !B, an order that GitLab does not record; "
+        "!A must be in the message (repeatable)",
+    )
+    sp_mr.add_argument(
         "--note",
         metavar="TEXT",
-        help="a sentence to add above the closing request, such as a merge "
-        "order that GitLab does not record",
+        help="a sentence to add above the closing request, such as the reason "
+        "for an --after order",
     )
     sp_mr.set_defaults(func=cmd_mr)
 

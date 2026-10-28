@@ -43,6 +43,7 @@ Run it from inside the repo working tree:
 |---------------------------------|------------------------------------------------------------------|
 | `slackwrite.py mr`              | The open MR whose source branch is the current branch's upstream |
 | `slackwrite.py mr --mine`       | Every open, non-draft MR that the user authored in the repo      |
+| `slackwrite.py mr --after A:B`  | Either form, with the order "!A merges after !B" (repeatable)    |
 | `slackwrite.py mr ... --note T` | The same, with the sentence `T` above the closing request        |
 
 The script prints the message, the path of the draft, and a line from slackcopy. Then do
@@ -65,8 +66,14 @@ The script states the merge order that GitLab records:
   the default branch or a protected branch does not count.
 - **Blocked by:** GitLab lists an unmerged MR as a dependency of the MR. A blocker that
   is also the stack parent is not stated twice.
+- **Merges after:** an order that you add with `--after A:B`, for "!A merges after !B".
+  `!A` must be in the message.
 - **Start with:** for two or more MRs, the listed MRs that others wait for and that wait
   for none.
+
+The bulleted list follows the merge order. It starts in MR number order, and moves each
+MR after the listed MRs that it waits for. If the order has a cycle, the script warns
+and the list ignores the step that closes it.
 
 GitLab does not record every order. A past session may have found that one MR must merge
 first, or that two MRs change the same files. Look for such an order on every run:
@@ -88,9 +95,12 @@ first, or that two MRs change the same files. Look for such an order on every ru
      `git show origin/<source>:<path>`.
    - Drop a lead about a merged MR, or about an order that the script already states.
 4. Act on each lead that holds:
-   - If it is an order that the reviewers need, run the script again with `--note`. Write
-     one or two short sentences in the style of the message:
-     `--note 'Merge !13 after !12 too: its migration has the same race condition.'`
+   - If it is an order that the reviewers need, run the script again with `--after`, so
+     the order also sets the list. Give the reason with `--note`, in one or two short
+     sentences in the style of the message:
+     `--after 13:12 --note '!13 has the same race condition as !12.'`
+   - If the reviewers need the lead but it sets no order, such as a decision not to
+     block, use `--note` alone.
    - If the lead offers more than one fix, or the fix changes an MR, do not choose. Ask
      the user.
 5. In the reply, list each lead that you kept or that needs a decision. Give its source
@@ -114,9 +124,9 @@ Do not add a note that you could not check. Report it to the user instead.
    from the title that it shows. A title without a key gets no Jira link.
 5. The Jira site comes from `site` in the jira-ticket config: `$JIRA_TICKET_CONFIG`, else
    `~/.claude/jira-ticket.toml`.
-6. One MR gets a three-line message. Two or more MRs get a bulleted list, ordered by MR
-   number. The merge order and the note go above the closing request: on a line each for
-   one MR, as a paragraph each for more.
+6. One MR gets a three-line message. Two or more MRs get a bulleted list in merge order.
+   The merge order and the note go above the closing request: on a line each for one MR,
+   as a paragraph each for more.
 
 The script warns on stderr when the branch's MR is a draft, and when an MR has blocking
 MRs that the user cannot see. `--mine` leaves drafts out.

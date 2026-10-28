@@ -1,3 +1,4 @@
+import argparse
 import json
 from pathlib import Path
 
@@ -329,6 +330,103 @@ def test_render_order_for_one_mr():
 
 def test_render_order_without_dependencies():
     assert sw.render_order([sw.parse_mr(node(1), REPO)], []) == ""
+
+
+def listed(*iids: int) -> list[sw.MR]:
+    return [sw.parse_mr(node(i), REPO) for i in iids]
+
+
+def test_render_order_follows_the_list():
+    deps = [
+        sw.Dep(ref(14), sw.AFTER, ref(15)),
+        sw.Dep(ref(12), sw.BLOCKED, ref(15)),
+    ]
+    assert sw.render_order(listed(15, 12, 14), deps) == (
+        f"Start with {link(15)}. {link(12)} is blocked by {link(15)}."
+        f" {link(14)} merges after {link(15)}."
+    )
+
+
+def test_render_order_for_one_mr_with_an_added_order():
+    deps = [sw.Dep(ref(14), sw.AFTER, ref(15))]
+    assert sw.render_order(listed(14), deps) == f"Merges after {link(15)}."
+
+
+# --- after_pair, after_deps, and merge_order ---------------------------------
+
+
+@pytest.mark.parametrize("text", ["14:15", "!14:!15", "!14:15"])
+def test_after_pair(text):
+    assert sw.after_pair(text) == (14, 15)
+
+
+@pytest.mark.parametrize("text", ["14", "14:14", "14:014", "a:b", "14:15:1", " 14:15"])
+def test_after_pair_rejects(text):
+    with pytest.raises(argparse.ArgumentTypeError, match="A:B"):
+        sw.after_pair(text)
+
+
+def test_after_deps_add_an_order():
+    assert sw.after_deps(listed(12, 14, 15), [], [(14, 15)]) == [
+        sw.Dep(ref(14), sw.AFTER, ref(15))
+    ]
+
+
+def test_after_deps_link_an_mr_outside_the_message():
+    assert sw.after_deps(listed(14), [], [(14, 42)]) == [
+        sw.Dep(ref(14), sw.AFTER, ref(42))
+    ]
+
+
+def test_after_deps_refuse_a_waiting_mr_outside_the_message():
+    with pytest.raises(sw.SlackwriteError, match="!7 is not listed"):
+        sw.after_deps(listed(1), [], [(7, 1)])
+
+
+def test_after_deps_skip_an_order_already_stated(capsys):
+    deps = [sw.Dep(ref(12), sw.BLOCKED, ref(15))]
+    pairs = [(12, 15), (15, 1), (15, 1)]
+    assert sw.after_deps(listed(12, 15), deps, pairs) == [
+        sw.Dep(ref(15), sw.AFTER, ref(1))
+    ]
+    assert capsys.readouterr().err.count("already states this order") == 2
+
+
+def iids(mrs: list[sw.MR]) -> list[int]:
+    return [mr.iid for mr in mrs]
+
+
+def test_merge_order_keeps_number_order_without_deps():
+    assert iids(sw.merge_order(listed(1, 2, 3), [])) == [1, 2, 3]
+
+
+def test_merge_order_moves_each_mr_after_what_it_waits_for():
+    deps = [
+        sw.Dep(ref(12), sw.BLOCKED, ref(15)),
+        sw.Dep(ref(13), sw.STACKED, ref(12)),
+    ]
+    assert iids(sw.merge_order(listed(12, 13, 14, 15), deps)) == [
+        15,
+        12,
+        13,
+        14,
+    ]
+
+
+def test_merge_order_places_what_an_mr_waits_for_in_number_order():
+    deps = [sw.Dep(ref(1), sw.AFTER, ref(3)), sw.Dep(ref(1), sw.BLOCKED, ref(2))]
+    assert iids(sw.merge_order(listed(1, 2, 3), deps)) == [2, 3, 1]
+
+
+def test_merge_order_ignores_mrs_outside_the_message():
+    deps = [sw.Dep(ref(2), sw.BLOCKED, ref(9))]
+    assert iids(sw.merge_order(listed(1, 2), deps)) == [1, 2]
+
+
+def test_merge_order_breaks_a_cycle(capsys):
+    deps = [sw.Dep(ref(1), sw.AFTER, ref(2)), sw.Dep(ref(2), sw.AFTER, ref(1))]
+    assert iids(sw.merge_order(listed(1, 2), deps)) == [2, 1]
+    assert "cycle at !2 -> !1" in capsys.readouterr().err
 
 
 # --- draft_path --------------------------------------------------------------
