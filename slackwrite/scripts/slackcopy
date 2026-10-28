@@ -1,0 +1,79 @@
+#!/bin/zsh
+# slackcopy — put a Markdown or HTML draft on the clipboard as rich
+# text tuned for Slack's composer.
+#
+# Markdown input is converted with pandoc (GFM), then tuned for
+# Slack's paste normalizer:
+#   - spaces touching a link become &nbsp; (Slack eats plain ones)
+#   - top-level blocks get an explicit <p><br></p> between them
+#     (Slack drops blank lines implied by paragraph margins)
+# HTML input (.html/.htm) is copied verbatim: author it pre-tuned.
+#
+# The clipboard gets two flavors: public.html (rich paste into Slack
+# and other rich composers) and plain text (fallback for plain
+# editors: the original source for Markdown, a text render for HTML).
+#
+# Known limits: content inside fenced code blocks is not shielded
+# from the block-separator pass; fine for prose-and-links messages.
+#
+# Usage: slackcopy FILE.md
+#        slackcopy FILE.html
+#        slackcopy -          # Markdown on stdin
+set -eu
+
+if [[ $# -ne 1 ]]; then
+  print -u2 "usage: slackcopy FILE.md|FILE.html|-"
+  exit 2
+fi
+
+command -v pandoc >/dev/null || { print -u2 "slackcopy: needs pandoc (brew install pandoc)"; exit 1 }
+
+infile=$1
+if [[ $infile == - ]]; then
+  src=$(cat)
+  kind=md
+else
+  src=$(<"$infile")
+  case ${infile:l} in
+    *.html|*.htm) kind=html ;;
+    *)            kind=md ;;
+  esac
+fi
+
+tune_html() {
+  # &nbsp;-guard spaces that abut anchors, then insert <p><br></p>
+  # between top-level blocks (depth-tracked so nested <p> inside
+  # lists/blockquotes don't get separators).
+  perl -pe 's{ <a\b}{&nbsp;<a}g; s{</a> }{</a>&nbsp;}g' |
+    awk '
+      {
+        if (depth == 0 && $0 ~ /^<(p|ul|ol|h[1-6]|blockquote|pre|table|hr)([ >\/]|$)/) {
+          if (seen) print "<p><br></p>"
+          seen = 1
+        }
+        if ($0 ~ /^<(ul|ol|blockquote)([ >]|$)/) depth++
+        if ($0 ~ /^<\/(ul|ol|blockquote)>/) depth--
+        print
+      }'
+}
+
+if [[ $kind == html ]]; then
+  html_out=$src
+  plain_out=$(print -r -- "$src" | pandoc -f html -t plain --wrap=none)
+else
+  html_out=$(print -r -- "$src" | pandoc -f gfm -t html --wrap=none | tune_html)
+  plain_out=$src
+fi
+
+export SLACKCOPY_HTML=$html_out
+export SLACKCOPY_PLAIN=$plain_out
+osascript -l JavaScript >/dev/null <<'JXA'
+ObjC.import('AppKit')
+const env = $.NSProcessInfo.processInfo.environment
+const pb = $.NSPasteboard.generalPasteboard
+pb.clearContents
+pb.setStringForType(env.objectForKey('SLACKCOPY_HTML'), $.NSPasteboardTypeHTML)
+pb.setStringForType(env.objectForKey('SLACKCOPY_PLAIN'), $.NSPasteboardTypeString)
+JXA
+
+print "slackcopy: clipboard set (HTML + plain) from ${infile}"

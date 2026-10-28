@@ -24,6 +24,7 @@ pythonpath = [
     "jira-ticket/scripts",
     "markdown-format/scripts",
     "pypi-version-check/scripts",
+    "slackwrite/scripts",
 ]
 
 [tool.ruff]
