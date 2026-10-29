@@ -6,7 +6,10 @@ from pathlib import Path
 import find_leads as fl
 import pytest
 
+import slackwrite as sw
+
 TERMS = fl.Terms.parse(["!12,ACME-1", "!15,ACME-2"])
+REPO = sw.Repo(Path("/r"), "gitlab.example.com", "acme/data/repo-x", "main")
 
 
 def lead_texts(text: str) -> list[tuple[list[str], str]]:
@@ -47,6 +50,64 @@ def test_terms_name_the_mrs_in_the_order_of_their_groups():
 def test_terms_prefer_the_longest_term():
     terms = fl.Terms.parse(["!1,ACME-1", "!2,ACME-1-b"])
     assert terms.named("see ACME-1-b") == ["!2"]
+
+
+SPELLED = fl.Terms.parse(["!12,ACME-1", "!13"], REPO)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "!12",
+        "repo-x!12",
+        "acme/data/repo-x!12",
+        "https://gitlab.example.com/acme/data/repo-x/-/merge_requests/12",
+        "(https://gitlab.example.com/acme/data/repo-x/-/merge_requests/12#note_9)",
+        "gitlab.example.com/acme/data/repo-x/-/merge_requests/12/diffs",
+    ],
+)
+def test_terms_with_a_repo_match_each_spelling_of_an_mr(text):
+    assert SPELLED.named(text) == ["!12"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "other-repo-x!12",  # another project
+        "repo-x!120",
+        "https://gitlab.example.com/acme/data/other/-/merge_requests/12",
+        "https://gitlab.example.com/acme/data/repo-x/-/merge_requests/120",
+        "https://my-gitlab.example.com/acme/data/repo-x/-/merge_requests/12",
+    ],
+)
+def test_terms_with_a_repo_do_not_match_another_mr(text):
+    assert SPELLED.named(text) == []
+
+
+def test_terms_probe_only_for_the_terms_that_hold_no_other_term():
+    assert sorted(SPELLED.probes) == sorted(
+        [
+            "!12",
+            "gitlab.example.com/acme/data/repo-x/-/merge_requests/12",
+            "ACME-1",
+            "!13",
+            "gitlab.example.com/acme/data/repo-x/-/merge_requests/13",
+        ]
+    )
+
+
+def test_terms_with_a_repo_spell_out_only_mr_numbers():
+    assert sorted(SPELLED.owner) == sorted(
+        [
+            "!12",
+            "repo-x!12",
+            "gitlab.example.com/acme/data/repo-x/-/merge_requests/12",
+            "ACME-1",
+            "!13",
+            "repo-x!13",
+            "gitlab.example.com/acme/data/repo-x/-/merge_requests/13",
+        ]
+    )
 
 
 # --- passages ----------------------------------------------------------------
@@ -140,15 +201,91 @@ def test_strings_walk_nested_values():
     assert list(fl.strings(value)) == ["x", "y", "z"]
 
 
-def test_project_dirs_take_the_root_and_its_worktrees(tmp_path):
-    for name in ["-Users-z-repo-x", "-Users-z-repo-x-tmp-wt-a", "-Users-z-other"]:
-        (tmp_path / name).mkdir()
-    (tmp_path / "-Users-z-repo-x.txt").write_text("", encoding="utf-8")
-    dirs = fl.project_dirs(Path("/Users/z/repo.x"), tmp_path)
-    assert dirs == [
-        (".", tmp_path / "-Users-z-repo-x"),
-        ("tmp-wt-a", tmp_path / "-Users-z-repo-x-tmp-wt-a"),
+# --- this skill's own blocks -------------------------------------------------
+
+
+def blocks_entry(*blocks: dict) -> dict:
+    return {"timestamp": "2026-10-20T01:00:00Z", "message": {"content": list(blocks)}}
+
+
+def call(tool_id: str, name: str = "Bash", **tool_input: str) -> dict:
+    return {"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}
+
+
+def result(tool_id: str, text: str) -> dict:
+    return {"type": "tool_result", "tool_use_id": tool_id, "content": text}
+
+
+def text(value: str) -> dict:
+    return {"type": "text", "text": value}
+
+
+def test_transcript_leads_skip_the_skills_own_calls_and_results(tmp_path):
+    t = tmp_path / "s.jsonl"
+    run = "~/.claude/skills/slackwrite/scripts/slackwrite.py mr --mine"
+    write_transcript(
+        t,
+        [
+            # The call names no MR, but its result does.
+            blocks_entry(text("Merge !12 after !15."), call("own", command=run)),
+            {
+                **blocks_entry(result("own", "!12 is blocked by !15")),
+                "toolUseResult": {"stdout": "!12 is blocked by !15"},
+            },
+            # A logged API request repeats the result beside other blocks.
+            blocks_entry(
+                result("own", "!12 is blocked by !15"),
+                result("other", "!12 and !15 edit one file"),
+            ),
+            blocks_entry(call("lf", command="find_leads.py '!12' '!15'")),
+            blocks_entry(call("rd", "Read", file_path="/r/scripts/find_leads.py")),
+            blocks_entry(result("rd", "    9\tsuch as `!12,ACME-1` and `!15`")),
+        ],
+    )
+    leads = [lead.text for lead in fl.transcript_leads(t, "s", TERMS)]
+    assert leads == ["Merge !12 after !15.", "!12 and !15 edit one file"]
+
+
+def test_a_test_file_is_not_one_of_the_skills_scripts():
+    own: set[str] = set()
+    entry = blocks_entry(call("t", command="pytest tests/x/test_find_leads.py"))
+    assert fl.drop_own(entry, own) == entry
+    assert own == set()
+
+
+def test_drop_own_drops_a_load_of_this_skill():
+    load = "Base directory for this skill: /h/.claude/skills/slackwrite\n\n# Slackwrite"
+    other = "Base directory for this skill: /h/.claude/skills/commit-msg\n\n!12"
+    entry = blocks_entry(text(load), text(other))
+    assert fl.drop_own(entry, set())["message"]["content"] == [text(other)]
+
+
+# --- project_dirs ------------------------------------------------------------
+
+
+def test_project_dirs_take_every_clone_and_worktree(tmp_path):
+    names = [
+        "-Users-z-klon-acme-data-repo-x",  # this clone
+        "-Users-z-klon-acme-data-repo-x--wt-a",  # a worktree under it
+        "-Users-z-klon-acme-data-repo-x-b",  # a worktree beside it
+        "-Users-z-acme-data-repo-x",  # another clone
+        "-Users-z-acme-data-repo-x-tmp-wt-c",  # a worktree of the other clone
+        "-Users-z-acme-data-repo-xy",  # another repo
+        "-Users-z-acme-data-other-repo-x",  # another repo
+        "-Users-z-acme-data",  # the group
     ]
+    for name in names:
+        (tmp_path / name).mkdir()
+    (tmp_path / "-Users-z-acme-data-repo-x.txt").write_text("", encoding="utf-8")
+    dirs = fl.project_dirs(Path("/Users/z/klon/acme/data/repo-x"), REPO, tmp_path)
+    assert [d.name for d in dirs] == sorted(names[:5])
+
+
+def test_project_dirs_take_a_clone_outside_a_mirrored_tree(tmp_path):
+    for name in ["-Users-z-code-repo-x", "-Users-z-code-repo-x-wt", "-Users-z-code"]:
+        (tmp_path / name).mkdir()
+    dirs = fl.project_dirs(Path("/Users/z/code/repo.x"), REPO, tmp_path)
+    assert [d.name for d in dirs] == ["-Users-z-code-repo-x", "-Users-z-code-repo-x-wt"]
 
 
 # --- find_leads and render ---------------------------------------------------
@@ -181,11 +318,11 @@ def project(tmp_path: Path) -> Path:
 
 
 def test_find_leads(project):
-    memory, transcripts = fl.find_leads([(".", project)], TERMS, "cccccccc-3")
+    memory, transcripts = fl.find_leads([project], TERMS, "cccccccc-3")
     assert memory == [
         fl.Lead(
             "2026-10-24",
-            "./memory/notes.md",
+            "-r/memory/notes.md",
             ("!12", "!15"),
             "Merge !12 after !15.",
         )
@@ -195,22 +332,38 @@ def test_find_leads(project):
     assert transcripts == [
         fl.Lead(
             "2026-10-23",
-            "./bbbbbbbb",
+            "-r/bbbbbbbb",
             ("!12", "!15"),
             "!12 conflicts with ACME-2",
         ),
-        fl.Lead("2026-10-22", "./bbbbbbbb", ("!12",), "ACME-1 depends on the seed"),
+        fl.Lead("2026-10-22", "-r/bbbbbbbb", ("!12",), "ACME-1 depends on the seed"),
     ]
 
 
 def test_render_shows_every_memory_lead_and_the_newest_transcript_leads(project):
-    memory, transcripts = fl.find_leads([(".", project)], TERMS, None)
-    text = fl.render(memory, transcripts, limit=1)
+    memory, transcripts = fl.find_leads([project], TERMS, None)
+    text = fl.render(memory, transcripts, limit=1, per_session=5)
     assert text == (
         "## Memory leads: 1\n\n"
-        "2026-10-24  ./memory/notes.md  !12 !15\n"
+        "2026-10-24  -r/memory/notes.md  !12 !15\n"
         "  Merge !12 after !15.\n\n"
-        "## Transcript leads: 3, the newest 1 shown\n\n"
-        "2026-10-27  ./cccccccc  !12 !15\n"
+        "## Transcript leads: 3 in 2 sessions, 1 shown"
+        " (newest first, at most 5 a session)\n\n"
+        "2026-10-27  -r/cccccccc  !12 !15\n"
         "  !12 and !15"
     )
+
+
+def test_render_caps_the_transcript_leads_of_one_session(project):
+    memory, transcripts = fl.find_leads([project], TERMS, None)
+    text = fl.render(memory, transcripts, limit=30, per_session=1)
+    assert "3 in 2 sessions, 2 shown" in text
+    assert "!12 conflicts with ACME-2" in text  # the newest of -r/bbbbbbbb
+    assert "depends on the seed" not in text
+
+
+def test_per_source_keeps_the_order():
+    pairs = [("a", "1"), ("b", "1"), ("a", "2"), ("a", "3"), ("b", "2")]
+    leads = [fl.Lead("d", source, (), text) for source, text in pairs]
+    assert [lead.text for lead in fl.per_source(leads, 2)] == ["1", "1", "2", "2"]
+    assert [lead.source for lead in fl.per_source(leads, 2)] == ["a", "b", "a", "b"]

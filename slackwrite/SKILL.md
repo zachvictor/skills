@@ -83,7 +83,8 @@ first, or that two MRs change the same files. Look for such an order on every ru
 
    `~/.claude/skills/slackwrite/scripts/find_leads.py '!12,ACME-1' '!13,ACME-2'`
 
-   It prints every lead in the repo's Claude Code memory files, then the newest leads in
+   Give `!N` for each MR. The script also matches `<repo>!N` and the URL of the MR. It
+   prints every lead in the repo's Claude Code memory files, then the newest leads in
    past session transcripts. A lead is a passage that names two of the MRs, or one MR and
    a merge-order phrase. Read the memory leads first. They are the curated record.
 3. Treat each lead as a claim from its date, not as a fact. Keep a lead only if it still
@@ -133,16 +134,29 @@ MRs that the user cannot see. `--mine` leaves drafts out.
 
 ## What find_leads.py searches
 
-- The project directories in `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`)
-  whose names start with the name of the repo's main worktree. These include the
-  worktrees under it.
+- The repo is the one that `slackwrite.py` uses. The upstream of the current branch gives
+  the GitLab host and the project path.
+- A term `!N` also matches `<repo>!N` and the URL of the MR. Other terms match as given.
+- It searches the project directories in `~/.claude/projects` (or
+  `$CLAUDE_CONFIG_DIR/projects`) for these paths:
+  - the main worktree, and each worktree whose path starts with the path of the main
+    worktree
+  - each clone whose path ends in the GitLab project path, and the worktrees of that
+    clone
 - In each one: `memory/*.md`, dated by the last change of the file, and the session
   transcripts `*.jsonl`, dated by each entry. Dates are UTC.
 - It skips the current session (`$CLAUDE_CODE_SESSION_ID`), because its content is
   already in context.
+- It skips the work of this skill in a transcript: the load of the skill, each tool call
+  that runs, reads, or edits `slackwrite.py` or `find_leads.py`, and the result of that
+  call. These repeat what the skill printed.
 - It removes the line numbers of file reads and the markers of diff lines, so a line
   that was read many times gives one lead. It shows each passage once, at its newest
-  date. `--limit` caps the transcript leads (default 30).
+  date.
+- `--limit` caps the transcript leads (default 30). `--per-session` caps the leads from
+  one session (default 5), so that one long session cannot fill the list.
+- The source of a lead is its project directory, then the memory file or the first 8
+  characters of the session ID.
 
 ## Where the draft goes
 
