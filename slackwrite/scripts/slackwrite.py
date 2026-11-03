@@ -11,16 +11,22 @@ Types (subcommands):
     mr    ask for review of the open MR for the current branch, or with
           --mine, of every open, non-draft MR you authored in the repo
 
-The repo comes from the upstream of the current branch: the URL of its remote
-gives the GitLab host and project path. `glab` supplies the MR data and auth.
+Here "MR" means a GitLab merge request or a GitHub pull request. The message
+uses the forge's own words: "MR !12" on GitLab, "PR #12" on GitHub.
 
-An `mr` message states the merge order that GitLab records. An MR is stacked
-on an open MR whose source branch it targets, unless that branch is the
-default branch or a protected branch. An MR is blocked by each unmerged MR
-that GitLab lists as its dependency. --after adds an order that GitLab does
-not record, and --note adds a sentence, such as the reason for that order.
-The list of MRs follows the merge order: by MR number, with each MR moved
-after the listed MRs that it waits for.
+The repo comes from the upstream of the current branch: the URL of its remote
+gives the host and the project path. A remote on github.com is a GitHub repo,
+and `gh` supplies the data and the auth. Any other host is a GitLab instance,
+and `glab` supplies them.
+
+An `mr` message states the merge order that the forge records. An MR is
+stacked on an open MR whose source branch it targets, unless that branch is a
+base branch (see is_base and gh_is_base). On GitLab, an MR is also blocked by
+each unmerged MR that GitLab lists as its dependency. GitHub has no such list.
+--after adds an order that the forge does not record, and --note adds a
+sentence, such as the reason for that order. The list of MRs follows the
+merge order: by MR number, with each MR moved after the listed MRs that it
+waits for.
 
 The draft goes to tmp/<title>_<KEY>/slack-<type>.md when the message is about
 one ticket and that ticket directory exists, else to
@@ -70,8 +76,8 @@ ORDER_VERBS = {
     BLOCKED: ("is blocked by", "Blocked by"),
     AFTER: ("merges after", "Merges after"),
 }
-# An --after value: "13:12" or "!13:!12", for "!13 merges after !12".
-_AFTER = re.compile(r"^!?(?P<mr>\d+):!?(?P<on>\d+)$")
+# An --after value: "13:12", "!13:!12", or "#13:#12", for "13 merges after 12".
+_AFTER = re.compile(r"^[!#]?(?P<mr>\d+):[!#]?(?P<on>\d+)$")
 # The MR number at the end of an MR's URL.
 _URL_IID = re.compile(r"/\d+$")
 
@@ -80,11 +86,11 @@ _URL_IID = re.compile(r"/\d+$")
 # The trailing "  " before \n is a Markdown hard line break. Keeping it inside
 # the quotes protects it from editors that strip trailing whitespace.
 
-MR_ONE = "{repo}: [MR !{iid}]({url})  \n{title}{jira}  \n{notes}_Please review_"
+MR_ONE = "{repo}: [{noun} {label}]({url})  \n{title}{jira}  \n{notes}_Please review_"
 MR_ONE_NOTE = "{text}  \n"
-MR_MANY = "{repo} MRs:\n\n{lines}\n\n{notes}_Please review_"
+MR_MANY = "{repo} {noun}s:\n\n{lines}\n\n{notes}_Please review_"
 MR_MANY_NOTE = "{text}\n\n"
-MR_LINE = "- [!{iid}]({url}) {title}{jira}"
+MR_LINE = "- [{label}]({url}) {title}{jira}"
 JIRA_REF = " ([{key}]({url}))"
 MR_REF = "[{label}]({url})"
 ORDER_START = "Start with {refs}."
@@ -147,25 +153,93 @@ query($path: ID!, $branches: [String!]) {
 """
 
 
+# --- GitHub GraphQL ----------------------------------------------------------
+# GitHub has no MR dependencies, so a PR records its merge order only in its
+# base branch. `associatedPullRequests` of a ref lists the PRs with that ref
+# as their head branch, so one query also finds each PR's stack parents.
+
+_GH_FRAGMENTS = """
+fragment pr on PullRequest {
+  number url title isDraft headRefName baseRefName
+  baseRef {
+    branchProtectionRule { id }
+    rules(first: 100) { nodes { type } }
+    associatedPullRequests(states: OPEN, first: 100) {
+      nodes { number url repository { nameWithOwner } }
+    }
+  }
+}
+fragment base on Repository {
+  defaultBranchRef { name }
+}
+"""
+GH_QUERY_MINE = (
+    """
+query($owner: String!, $name: String!, $search: String!) {
+  repository(owner: $owner, name: $name) { ...base }
+  search(query: $search, type: ISSUE, first: 100) { nodes { ...pr } }
+}
+"""
+    + _GH_FRAGMENTS
+)
+GH_QUERY_BRANCH = (
+    """
+query($owner: String!, $name: String!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    ...base
+    pullRequests(states: OPEN, headRefName: $branch, first: 100) {
+      nodes { ...pr }
+    }
+  }
+}
+"""
+    + _GH_FRAGMENTS
+)
+# A GitHub search for your open, non-draft PRs in one repo.
+GH_SEARCH_MINE = "repo:{path} is:pr is:open draft:false author:@me"
+# The ruleset rule that makes a branch take changes only through a PR.
+GH_PR_RULE = "PULL_REQUEST"
+
+
 class SlackwriteError(RuntimeError):
     """A step failed. The message says which step and why."""
+
+
+@dataclass(frozen=True)
+class Forge:
+    """A code host, and the words that its MRs go by."""
+
+    cli: str  # the CLI that supplies the data and the auth
+    noun: str  # what the forge calls an MR
+    sigil: str  # what goes before an MR number in a reference
+    mr_path: str  # what goes between the project URL and an MR number
+
+
+GITLAB = Forge("glab", "MR", "!", "-/merge_requests/")
+GITHUB = Forge("gh", "PR", "#", "pull/")
+# The host of a GitHub remote. A remote on any other host is a GitLab instance.
+GITHUB_HOST = "github.com"
 
 
 @dataclass(frozen=True)
 class Repo:
     root: Path  # the top of the working tree
     host: str
-    path: str  # the GitLab project path: group/subgroup/name
+    path: str  # the project path: group/subgroup/name, or owner/name on GitHub
     branch: str  # the upstream branch, as the remote names it
 
     @property
     def name(self) -> str:
         return self.path.rsplit("/", 1)[-1]
 
+    @property
+    def forge(self) -> Forge:
+        return GITHUB if self.host == GITHUB_HOST else GITLAB
+
 
 @dataclass(frozen=True)
 class Ref:
-    label: str  # "!12", or "group/project!12" for an MR of another project
+    label: str  # "!12" or "#12", or "group/project!12" for another project's MR
     url: str
 
     def link(self) -> str:
@@ -174,6 +248,7 @@ class Ref:
 
 @dataclass(frozen=True)
 class MR:
+    forge: Forge
     iid: int
     url: str
     title: str  # without the ticket key
@@ -185,7 +260,7 @@ class MR:
 
     @property
     def ref(self) -> Ref:
-        return Ref(f"!{self.iid}", self.url)
+        return Ref(f"{self.forge.sigil}{self.iid}", self.url)
 
 
 @dataclass(frozen=True)
@@ -239,22 +314,49 @@ def current_repo() -> Repo:
 
 
 def graphql(repo: Repo, query: str, **variables: object) -> dict:
-    """Run a query that reads the repo's project, and return its data."""
-    # glab exits non-zero when the response has errors.
+    """Run a query through the CLI of the repo's forge, and return its data."""
+    # glab and gh exit non-zero when the response has errors.
     out = run(
-        "glab", "api", "graphql", "--hostname", repo.host, "--input", "-",
+        repo.forge.cli, "api", "graphql", "--hostname", repo.host, "--input", "-",
         stdin=json.dumps({"query": query, "variables": variables}),
     )  # fmt: skip
-    data = json.loads(out)["data"]
-    if data["project"] is None:
-        raise SlackwriteError(f"no project {repo.path} on {repo.host} that you can see")
-    return data
+    return json.loads(out)["data"]
 
 
 def split_title(title: str) -> tuple[str, str | None]:
     """Split the ticket key off the end of an MR title, if the title has one."""
     m = _TITLE_KEY.match(title)
     return (m["title"], m["key"]) if m else (title, None)
+
+
+def found(repo: Repo, mrs: list[MR], mine: bool) -> list[MR]:
+    """Return `mrs` by MR number, if they suit the request; else raise."""
+    mrs = sorted(mrs, key=lambda mr: mr.iid)
+    noun = repo.forge.noun
+    if mine and not mrs:
+        raise SlackwriteError(f"you have no open, non-draft {noun}s in {repo.path}")
+    if not mrs:
+        raise SlackwriteError(
+            f"no open {noun} for branch {repo.branch!r} in {repo.path}"
+        )
+    if not mine and len(mrs) > 1:
+        refs = ", ".join(mr.ref.label for mr in mrs)
+        raise SlackwriteError(
+            f"branch {repo.branch!r} has more than one open {noun}: {refs}"
+        )
+    return mrs
+
+
+# --- GitLab ------------------------------------------------------------------
+
+
+def gitlab_graphql(repo: Repo, query: str, **variables: object) -> dict:
+    """Run a query that reads the repo's GitLab project, and return its data."""
+    data = graphql(repo, query, **variables)
+    # GitLab answers null, not an error, for a project that you cannot see.
+    if data["project"] is None:
+        raise SlackwriteError(f"no project {repo.path} on {repo.host} that you can see")
+    return data
 
 
 def parse_mr(node: dict, repo: Repo) -> MR:
@@ -274,13 +376,9 @@ def parse_mr(node: dict, repo: Repo) -> MR:
         label = f"!{b['iid']}" if path == repo.path else f"{path}!{b['iid']}"
         blockers.append(Ref(label, b["webUrl"]))
     return MR(
-        int(node["iid"]), node["webUrl"], title, key, node["draft"],
+        GITLAB, int(node["iid"]), node["webUrl"], title, key, node["draft"],
         node["sourceBranch"], node["targetBranch"], tuple(blockers),
     )  # fmt: skip
-
-
-def by_number(nodes: list[dict], repo: Repo) -> list[MR]:
-    return sorted((parse_mr(node, repo) for node in nodes), key=lambda mr: mr.iid)
 
 
 def base_branches(project: dict) -> list[str]:
@@ -300,27 +398,20 @@ def is_base(branch: str, patterns: Sequence[str]) -> bool:
     )
 
 
-def branch_mr(repo: Repo) -> tuple[list[MR], list[str]]:
-    """Return the open MR for the upstream branch, and the base branches."""
-    project = graphql(repo, QUERY_BRANCH, path=repo.path, branch=repo.branch)["project"]
-    mrs = by_number(project["mergeRequests"]["nodes"], repo)
-    if not mrs:
-        raise SlackwriteError(f"no open MR for branch {repo.branch!r} in {repo.path}")
-    if len(mrs) > 1:
-        iids = ", ".join(f"!{mr.iid}" for mr in mrs)
-        raise SlackwriteError(
-            f"branch {repo.branch!r} has more than one open MR: {iids}"
-        )
-    return mrs, base_branches(project)
+def gitlab_mrs(repo: Repo, mine: bool) -> tuple[list[MR], dict[str, list[Ref]]]:
+    """Return the MRs by MR number, and their stack parents by source branch.
 
-
-def my_mrs(repo: Repo) -> tuple[list[MR], list[str]]:
-    """Return your open, non-draft MRs by MR number, and the base branches."""
-    data = graphql(repo, QUERY_MINE, path=repo.path, projectPath=repo.path)
-    mrs = by_number(data["currentUser"]["authoredMergeRequests"]["nodes"], repo)
-    if not mrs:
-        raise SlackwriteError(f"you have no open, non-draft MRs in {repo.path}")
-    return mrs, base_branches(data["project"])
+    The MRs are the open MR for the upstream branch, or with `mine`, your
+    open, non-draft MRs.
+    """
+    if mine:
+        data = gitlab_graphql(repo, QUERY_MINE, path=repo.path, projectPath=repo.path)
+        nodes = data["currentUser"]["authoredMergeRequests"]["nodes"]
+    else:
+        data = gitlab_graphql(repo, QUERY_BRANCH, path=repo.path, branch=repo.branch)
+        nodes = data["project"]["mergeRequests"]["nodes"]
+    mrs = found(repo, [parse_mr(node, repo) for node in nodes], mine)
+    return mrs, stack_parents(repo, mrs, base_branches(data["project"]))
 
 
 def stack_parents(
@@ -330,7 +421,7 @@ def stack_parents(
     branches = sorted({mr.target for mr in mrs if not is_base(mr.target, base)})
     if not branches:
         return {}
-    data = graphql(repo, QUERY_PARENTS, path=repo.path, branches=branches)
+    data = gitlab_graphql(repo, QUERY_PARENTS, path=repo.path, branches=branches)
     parents: dict[str, list[Ref]] = {}
     for node in data["project"]["mergeRequests"]["nodes"]:
         ref = Ref(f"!{node['iid']}", node["webUrl"])
@@ -338,8 +429,77 @@ def stack_parents(
     return parents
 
 
+# --- GitHub ------------------------------------------------------------------
+
+
+def parse_pr(node: dict) -> MR:
+    """Return the PR in a GraphQL `pr` fragment."""
+    title, key = split_title(node["title"])
+    return MR(
+        GITHUB, node["number"], node["url"], title, key, node["isDraft"],
+        node["headRefName"], node["baseRefName"],
+    )  # fmt: skip
+
+
+def gh_is_base(branch: str, ref: dict, default: str) -> bool:
+    """Tell whether a PR's base branch is a base branch.
+
+    A base branch is the default branch, a branch with a classic protection
+    rule, or a branch where a ruleset requires a PR. Other ruleset rules do not
+    count, because a ruleset such as "require signed commits" can apply to
+    every branch.
+    """
+    return (
+        branch == default
+        or ref["branchProtectionRule"] is not None
+        or any(rule["type"] == GH_PR_RULE for rule in ref["rules"]["nodes"])
+    )
+
+
+def gh_parents(node: dict, repo: Repo, default: str) -> list[Ref]:
+    """Return the open PRs whose head branch is the base branch of a PR."""
+    ref = node["baseRef"]
+    # A PR whose base branch was deleted has no base ref.
+    if ref is None or gh_is_base(node["baseRefName"], ref, default):
+        return []
+    parents = []
+    for p in ref["associatedPullRequests"]["nodes"]:
+        path = p["repository"]["nameWithOwner"]
+        label = f"#{p['number']}" if path == repo.path else f"{path}#{p['number']}"
+        parents.append(Ref(label, p["url"]))
+    return parents
+
+
+def github_prs(repo: Repo, mine: bool) -> tuple[list[MR], dict[str, list[Ref]]]:
+    """Return the PRs by PR number, and their stack parents by head branch.
+
+    The PRs are the open PR for the upstream branch, or with `mine`, your
+    open, non-draft PRs.
+    """
+    owner, _, name = repo.path.partition("/")
+    if mine:
+        search = GH_SEARCH_MINE.format(path=repo.path)
+        data = graphql(repo, GH_QUERY_MINE, owner=owner, name=name, search=search)
+        nodes = data["search"]["nodes"]
+    else:
+        data = graphql(
+            repo, GH_QUERY_BRANCH, owner=owner, name=name, branch=repo.branch
+        )
+        nodes = data["repository"]["pullRequests"]["nodes"]
+    mrs = found(repo, [parse_pr(node) for node in nodes], mine)
+    default = data["repository"]["defaultBranchRef"]["name"]
+    parents = {}
+    for node in nodes:
+        if refs := gh_parents(node, repo, default):
+            parents[node["baseRefName"]] = refs
+    return mrs, parents
+
+
+# --- merge order -------------------------------------------------------------
+
+
 def dependencies(mrs: list[MR], parents: dict[str, list[Ref]]) -> list[Dep]:
-    """Return the merge order that GitLab records for `mrs`, in their order."""
+    """Return the merge order that the forge records for `mrs`, in their order."""
     deps = []
     for mr in mrs:
         stacked = parents.get(mr.target, [])
@@ -354,14 +514,15 @@ def after_deps(
 ) -> list[Dep]:
     """Return a Dep for each --after pair that `deps` does not already state."""
     listed = {mr.iid: mr.ref for mr in mrs}
+    sigil = mrs[0].forge.sigil
     stated = {(d.mr, d.on) for d in deps}
     added = []
     for iid, on_iid in pairs:
         if iid not in listed:
-            raise SlackwriteError(f"--after {iid}:{on_iid}: !{iid} is not listed")
+            raise SlackwriteError(f"--after {iid}:{on_iid}: {sigil}{iid} is not listed")
         # An MR outside the message gets a URL in the shape of a listed MR's.
         on = listed.get(on_iid) or Ref(
-            f"!{on_iid}", _URL_IID.sub(f"/{on_iid}", mrs[0].url)
+            f"{sigil}{on_iid}", _URL_IID.sub(f"/{on_iid}", mrs[0].url)
         )
         if (listed[iid], on) in stated:
             warn(f"--after {iid}:{on_iid}: the message already states this order")
@@ -452,14 +613,15 @@ def render_mr(
         jira = ""
         if mr.key:
             jira = JIRA_REF.format(key=mr.key, url=f"https://{site}/browse/{mr.key}")
-        return {"iid": mr.iid, "url": mr.url, "title": mr.title, "jira": jira}
+        return {"label": mr.ref.label, "url": mr.url, "title": mr.title, "jira": jira}
 
+    noun = mrs[0].forge.noun
     if len(mrs) == 1:
         text = "".join(MR_ONE_NOTE.format(text=n) for n in notes)
-        return MR_ONE.format(repo=repo_name, notes=text, **fields(mrs[0]))
+        return MR_ONE.format(repo=repo_name, noun=noun, notes=text, **fields(mrs[0]))
     lines = "\n".join(MR_LINE.format(**fields(mr)) for mr in mrs)
     text = "".join(MR_MANY_NOTE.format(text=n) for n in notes)
-    return MR_MANY.format(repo=repo_name, lines=lines, notes=text)
+    return MR_MANY.format(repo=repo_name, noun=noun, lines=lines, notes=text)
 
 
 def draft_path(root: Path, kind: str, key: str | None) -> Path:
@@ -492,11 +654,12 @@ def deliver(text: str, path: Path) -> None:
 
 def cmd_mr(args: argparse.Namespace) -> int:
     repo = current_repo()
-    mrs, base = my_mrs(repo) if args.mine else branch_mr(repo)
+    gather = github_prs if repo.forge is GITHUB else gitlab_mrs
+    mrs, parents = gather(repo, args.mine)
     for mr in mrs:
         if mr.draft:
-            warn(f"!{mr.iid} is a draft")
-    deps = dependencies(mrs, stack_parents(repo, mrs, base))
+            warn(f"{mr.ref.label} is a draft")
+    deps = dependencies(mrs, parents)
     deps += after_deps(mrs, deps, args.after)
     mrs = merge_order(mrs, deps)
     notes = [n for n in (render_order(mrs, deps), (args.note or "").strip()) if n]
@@ -534,8 +697,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         type=after_pair,
         metavar="A:B",
-        help="!A merges after !B, an order that GitLab does not record; "
-        "!A must be in the message (repeatable)",
+        help="MR A merges after MR B, an order that the forge does not record; "
+        "A must be in the message (repeatable)",
     )
     sp_mr.add_argument(
         "--note",

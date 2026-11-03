@@ -10,6 +10,7 @@ Agent skills for use with agentic coding tools. These skills follow the [Agent S
 | [jira-ticket](./jira-ticket/)               | Creates, updates, transitions, and comments on Jira tickets via `acli`, from Markdown drafts converted to Atlassian Document Format. Applies per-profile defaults (project, epic, labels, assignee) chosen by the repo's GitLab path. |
 | [markdown-format](./markdown-format/)       | Formats Markdown source without reflowing prose. Aligns table columns, leaving paragraphs, fenced code blocks, alignment colons, and indentation byte identical.                                                                      |
 | [pypi-version-check](./pypi-version-check/) | Checks Python dependencies against PyPI to ensure versions are current before committing. Supports `requirements.txt`, `pyproject.toml`, `setup.cfg`, `setup.py`, `Pipfile`, and `environment.yml`.                                   |
+| [slackwrite](./slackwrite/)                 | Drafts Slack messages from repo data with fixed templates, and copies them as rich text for Slack. Type `mr` asks for review of open GitLab MRs or GitHub PRs, in the merge order that the forge records. Needs macOS and pandoc.     |
 
 ## Installation
 

@@ -110,6 +110,45 @@ def test_terms_with_a_repo_spell_out_only_mr_numbers():
     )
 
 
+GH_REPO = sw.Repo(Path("/r"), "github.com", "acme/repo-x", "main")
+GH_SPELLED = fl.Terms.parse(["#12,ACME-1"], GH_REPO)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "#12",
+        "PR #12",
+        "repo-x#12",
+        "acme/repo-x#12",
+        "https://github.com/acme/repo-x/pull/12",
+        "github.com/acme/repo-x/pull/12/files",
+    ],
+)
+def test_terms_with_a_github_repo_match_each_spelling_of_a_pr(text):
+    assert GH_SPELLED.named(text) == ["#12"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "#120",
+        "#12abc",  # a color, not a PR
+        "other-repo-x#12",
+        "https://github.com/acme/repo-x/pull/120",
+        "https://gitlab.example.com/acme/repo-x/-/merge_requests/12",
+    ],
+)
+def test_terms_with_a_github_repo_do_not_match_another_pr(text):
+    assert GH_SPELLED.named(text) == []
+
+
+def test_terms_spell_out_only_the_reference_form_of_the_forge():
+    # GitLab writes an issue as #N, and an MR as !N.
+    assert sorted(fl.Terms.parse(["#12"], REPO).owner) == ["#12"]
+    assert sorted(fl.Terms.parse(["!12"], GH_REPO).owner) == ["!12"]
+
+
 # --- passages ----------------------------------------------------------------
 
 

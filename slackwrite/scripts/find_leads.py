@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """Find what Claude Code memory and past sessions say about MR merge order.
 
-GitLab records two kinds of merge order, stacked MRs and MR dependencies, and
-slackwrite.py states both. This script looks for the rest: an order that a
-past session found or agreed on, but that nobody recorded in GitLab. It prints
-leads, not facts. A lead is only as current as its date.
+Here "MR" means a GitLab merge request or a GitHub pull request, as in
+slackwrite.py. The forge records some merge order (stacked MRs, and on GitLab,
+MR dependencies), and slackwrite.py states it. This script looks for the rest:
+an order that a past session found or agreed on, but that nobody recorded in
+the forge. It prints leads, not facts. A lead is only as current as its date.
 
 Name each MR with a group of terms joined by commas, such as its reference and
-its ticket key: `!12,ACME-1`. A term `!N` also matches `<repo>!N` (the
-form GitLab uses for an MR of a project in the same group) and the MR's URL.
-A lead is a passage that names two of the MRs, or that names one MR and a
-merge-order phrase.
+its ticket key: `!12,ACME-1` on GitLab, `#12,ACME-1` on GitHub. A reference
+in the forge's form also matches `<repo>!N` or `<repo>#N` (the short form of
+an MR in another project) and the MR's URL. A lead is a passage that names two
+of the MRs, or that names one MR and a merge-order phrase.
 
 The repo is the one slackwrite.py uses: the upstream of the current branch
-gives its GitLab host and project path. The search reads each Claude Code
-project directory for the repo:
+gives its host and project path. The search reads each Claude Code project
+directory for the repo:
 
 - the directory of the main worktree, and of each worktree whose path starts
   with the path of the main worktree
-- the directory of each clone whose path ends in the GitLab project path, and
-  of the worktrees of that clone
+- the directory of each clone whose path ends in the project path, and of the
+  worktrees of that clone
 
 In each one it reads:
 
@@ -68,8 +69,9 @@ _ORDER = re.compile(
 # What tool output puts before a line of a file: the line number of a file
 # read, or the marker of a diff line. The same line then reads the same.
 _LINE_PREFIX = re.compile(r"^(?:\s*\d+\t|[+-](?=\S))")
-# A term that names an MR of the repo by its number.
-_MR_TERM = re.compile(r"^!(?P<iid>\d+)$")
+# A term that names an MR of the repo by its number, as GitLab (!) or GitHub
+# (#) writes it.
+_MR_TERM = re.compile(r"^(?P<sigil>[!#])(?P<iid>\d+)$")
 # The left edge of a term: no letter or digit before it.
 _EDGE = r"(?<![A-Za-z0-9])"
 # The left edge of a project name or host, which can hold "-", "_", and ".".
@@ -100,13 +102,10 @@ class Lead:
 def spellings(term: str, repo: slackwrite.Repo | None) -> list[tuple[str, str]]:
     """Return each way to write `term`, with the left edge that it needs."""
     m = _MR_TERM.match(term)
-    if m is None or repo is None:
+    if m is None or repo is None or m["sigil"] != repo.forge.sigil:
         return [(term, _EDGE)]
-    return [
-        (term, _EDGE),
-        (f"{repo.name}{term}", _NAME_EDGE),
-        (f"{repo.host}/{repo.path}/-/merge_requests/{m['iid']}", _NAME_EDGE),
-    ]
+    url = f"{repo.host}/{repo.path}/{repo.forge.mr_path}{m['iid']}"
+    return [(term, _EDGE), (f"{repo.name}{term}", _NAME_EDGE), (url, _NAME_EDGE)]
 
 
 @dataclass(frozen=True)
@@ -120,7 +119,7 @@ class Terms:
 
     @classmethod
     def parse(cls, groups: Sequence[str], repo: slackwrite.Repo | None = None) -> Terms:
-        """Parse the groups. With `repo`, a term `!N` gets its other spellings."""
+        """Parse the groups. With `repo`, an MR reference gets its other spellings."""
         owner: dict[str, str] = {}
         edges: dict[str, str] = {}
         for group in groups:
@@ -267,8 +266,8 @@ def main_worktree() -> Path:
 def project_dirs(root: Path, repo: slackwrite.Repo, projects: Path) -> list[Path]:
     """Return the project directory of each clone and worktree of the repo.
 
-    A directory counts if its path starts with `root`, or ends in the GitLab
-    project path, in either case followed by nothing or by a further part.
+    A directory counts if its path starts with `root`, or ends in the project
+    path, in either case followed by nothing or by a further part.
     """
     root_slug = re.escape(_SLUG_CHAR.sub("-", str(root)))
     path_slug = re.escape(_SLUG_CHAR.sub("-", repo.path))
@@ -354,7 +353,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "groups",
         nargs="+",
         metavar="GROUP",
-        help="one MR's terms, joined by commas, such as '!12,ACME-1'",
+        help="one MR's terms, joined by commas, such as '!12,ACME-1' on GitLab "
+        "or '#12,ACME-1' on GitHub",
     )
     p.add_argument(
         "--limit",

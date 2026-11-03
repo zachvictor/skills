@@ -13,7 +13,7 @@ REPO = sw.Repo(Path("/r"), "gitlab.com", "acme/platform/data/query-api", "feat/2
 
 def mr(iid: int, title: str, key: str | None, repo: str = "query-api") -> sw.MR:
     url = f"{GROUP}/{repo}/-/merge_requests/{iid}"
-    return sw.MR(iid, url, title, key, False, f"feat/{iid}", "develop")
+    return sw.MR(sw.GITLAB, iid, url, title, key, False, f"feat/{iid}", "develop")
 
 
 def url(iid: int, project: str = REPO.path) -> str:
@@ -80,6 +80,19 @@ def test_parse_remote_rejects_a_local_path():
 def test_repo_name_is_the_last_path_segment():
     repo = sw.Repo(Path("/r"), "gitlab.com", "acme/platform/query-api", "main")
     assert repo.name == "query-api"
+
+
+@pytest.mark.parametrize(
+    ("host", "forge"),
+    [
+        ("github.com", sw.GITHUB),
+        ("gitlab.com", sw.GITLAB),
+        ("gitlab.example.com", sw.GITLAB),
+        ("github.com.example.com", sw.GITLAB),
+    ],
+)
+def test_repo_forge_is_github_only_on_github_com(host, forge):
+    assert sw.Repo(Path("/r"), host, "acme/query-api", "main").forge is forge
 
 
 # --- split_title -------------------------------------------------------------
@@ -184,10 +197,10 @@ def test_graphql_sends_the_query_to_the_repo_host(monkeypatch):
     assert body == {"query": "query", "variables": {"path": REPO.path}}
 
 
-def test_graphql_reports_a_project_that_the_user_cannot_see(monkeypatch):
+def test_gitlab_graphql_reports_a_project_that_the_user_cannot_see(monkeypatch):
     monkeypatch.setattr(sw, "run", lambda *a, **k: '{"data": {"project": null}}')
     with pytest.raises(sw.SlackwriteError, match="no project"):
-        sw.graphql(REPO, "query")
+        sw.gitlab_graphql(REPO, "query")
 
 
 # --- parse_mr ----------------------------------------------------------------
@@ -195,7 +208,7 @@ def test_graphql_reports_a_project_that_the_user_cannot_see(monkeypatch):
 
 def test_parse_mr():
     assert sw.parse_mr(node(7, target="feat/6"), REPO) == sw.MR(
-        7, url(7), "feat: change 7", "ACME-7", False, "feat/7", "feat/6"
+        sw.GITLAB, 7, url(7), "feat: change 7", "ACME-7", False, "feat/7", "feat/6"
     )
 
 
@@ -483,3 +496,214 @@ def test_jira_site_reports_a_missing_config(tmp_path, monkeypatch):
     monkeypatch.setenv(sw.JIRA_CONFIG_ENV, str(tmp_path / "missing.toml"))
     with pytest.raises(sw.SlackwriteError, match="cannot read"):
         sw.jira_site()
+
+
+# --- GitHub ------------------------------------------------------------------
+
+GH_REPO = sw.Repo(Path("/r"), "github.com", "acme/query-api", "feat/9")
+
+
+def pr_url(number: int, path: str = GH_REPO.path) -> str:
+    return f"https://github.com/{path}/pull/{number}"
+
+
+def pr_ref(number: int) -> sw.Ref:
+    return sw.Ref(f"#{number}", pr_url(number))
+
+
+def base_ref(parents: tuple = (), protected: bool = False, rules: tuple = ()) -> dict:
+    """The base ref in a GraphQL `pr` fragment, as GitHub returns it."""
+    return {
+        "branchProtectionRule": {"id": "BPR_1"} if protected else None,
+        "rules": {"nodes": [{"type": t} for t in rules]},
+        "associatedPullRequests": {"nodes": list(parents)},
+    }
+
+
+def parent(number: int, path: str = GH_REPO.path) -> dict:
+    return {
+        "number": number,
+        "url": pr_url(number, path),
+        "repository": {"nameWithOwner": path},
+    }
+
+
+def pr_node(
+    number: int, base: str = "main", ref: dict | None = None, draft: bool = False
+) -> dict:
+    """A GraphQL `pr` fragment, as GitHub returns it."""
+    return {
+        "number": number,
+        "url": pr_url(number),
+        "title": f"feat: change {number} (ACME-{number})",
+        "isDraft": draft,
+        "headRefName": f"feat/{number}",
+        "baseRefName": base,
+        "baseRef": base_ref() if ref is None else ref,
+    }
+
+
+def pr_link(number: int) -> str:
+    return f"[#{number}]({pr_url(number)})"
+
+
+def test_graphql_sends_a_github_query_through_gh(monkeypatch):
+    calls = []
+
+    def fake_run(*cmd, stdin=None):
+        calls.append(cmd)
+        return '{"data": {"repository": null}}'
+
+    monkeypatch.setattr(sw, "run", fake_run)
+    assert sw.graphql(GH_REPO, "query") == {"repository": None}
+    assert calls[0][:5] == ("gh", "api", "graphql", "--hostname", "github.com")
+
+
+def test_parse_pr():
+    assert sw.parse_pr(pr_node(9, base="feat/8")) == sw.MR(
+        sw.GITHUB, 9, pr_url(9), "feat: change 9", "ACME-9", False, "feat/9", "feat/8"
+    )
+
+
+def test_a_pr_ref_uses_a_hash():
+    assert sw.parse_pr(pr_node(9)).ref == pr_ref(9)
+
+
+def test_render_one_pr():
+    text = sw.render_mr("query-api", [sw.parse_pr(pr_node(9))], SITE)
+    assert text.splitlines()[0] == f"query-api: [PR #9]({pr_url(9)})  "
+
+
+def test_render_many_prs():
+    prs = [sw.parse_pr(pr_node(i)) for i in (8, 9)]
+    text = sw.render_mr("query-api", prs, SITE)
+    assert text.splitlines()[:3] == [
+        "query-api PRs:",
+        "",
+        f"- {pr_link(8)} feat: change 8 ([ACME-8](https://{SITE}/browse/ACME-8))",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("branch", "ref", "expected"),
+    [
+        ("main", base_ref(), True),
+        ("develop", base_ref(protected=True), True),
+        ("develop", base_ref(rules=("REQUIRED_SIGNATURES", "PULL_REQUEST")), True),
+        # A ruleset that applies to every branch does not make a base branch.
+        ("feat/8", base_ref(rules=("REQUIRED_SIGNATURES", "DELETION")), False),
+        ("feat/8", base_ref(), False),
+    ],
+)
+def test_gh_is_base(branch, ref, expected):
+    assert sw.gh_is_base(branch, ref, "main") is expected
+
+
+def test_gh_parents_are_the_open_prs_from_the_base_branch():
+    ref = base_ref(parents=(parent(8), parent(3, "acme/other")))
+    node = pr_node(9, base="feat/8", ref=ref)
+    assert sw.gh_parents(node, GH_REPO, "main") == [
+        pr_ref(8),
+        sw.Ref("acme/other#3", pr_url(3, "acme/other")),
+    ]
+
+
+def test_gh_parents_skip_a_base_branch():
+    node = pr_node(9, base="main", ref=base_ref(parents=(parent(1),)))
+    assert sw.gh_parents(node, GH_REPO, "main") == []
+
+
+def test_gh_parents_skip_a_deleted_base_branch():
+    node = pr_node(9, base="feat/8")
+    node["baseRef"] = None
+    assert sw.gh_parents(node, GH_REPO, "main") == []
+
+
+def fake_gh(monkeypatch, data: dict) -> list[tuple[str, dict]]:
+    calls = []
+
+    def fake_graphql(repo, query, **variables):
+        calls.append((query, variables))
+        return data
+
+    monkeypatch.setattr(sw, "graphql", fake_graphql)
+    return calls
+
+
+REPOSITORY = {"defaultBranchRef": {"name": "main"}}
+
+
+def test_github_prs_mine(monkeypatch):
+    nodes = [
+        pr_node(10),
+        pr_node(9, base="feat/8", ref=base_ref(parents=(parent(8),))),
+        pr_node(8),
+    ]
+    calls = fake_gh(monkeypatch, {"repository": REPOSITORY, "search": {"nodes": nodes}})
+    prs, parents = sw.github_prs(GH_REPO, mine=True)
+    assert [pr.iid for pr in prs] == [8, 9, 10]
+    assert parents == {"feat/8": [pr_ref(8)]}
+    [(query, variables)] = calls
+    assert query == sw.GH_QUERY_MINE
+    assert variables == {
+        "owner": "acme",
+        "name": "query-api",
+        "search": "repo:acme/query-api is:pr is:open draft:false author:@me",
+    }
+
+
+def test_github_prs_for_the_branch(monkeypatch):
+    repository = {**REPOSITORY, "pullRequests": {"nodes": [pr_node(9)]}}
+    calls = fake_gh(monkeypatch, {"repository": repository})
+    prs, parents = sw.github_prs(GH_REPO, mine=False)
+    assert [pr.iid for pr in prs] == [9]
+    assert parents == {}
+    assert calls[0][1] == {"owner": "acme", "name": "query-api", "branch": "feat/9"}
+
+
+@pytest.mark.parametrize(
+    ("mine", "nodes", "message"),
+    [
+        (False, [], "no open PR for branch 'feat/9' in acme/query-api"),
+        (False, [pr_node(9), pr_node(7)], "more than one open PR: #7, #9"),
+        (True, [], "you have no open, non-draft PRs in acme/query-api"),
+    ],
+)
+def test_github_prs_refuse(monkeypatch, mine, nodes, message):
+    repository = {**REPOSITORY, "pullRequests": {"nodes": nodes}}
+    fake_gh(monkeypatch, {"repository": repository, "search": {"nodes": nodes}})
+    with pytest.raises(sw.SlackwriteError, match=message):
+        sw.github_prs(GH_REPO, mine)
+
+
+def test_a_stack_of_prs_sets_the_list_and_the_order(monkeypatch):
+    nodes = [
+        pr_node(6),
+        pr_node(8),
+        pr_node(9, base="feat/8", ref=base_ref(parents=(parent(8),))),
+        pr_node(10),
+    ]
+    fake_gh(monkeypatch, {"repository": REPOSITORY, "search": {"nodes": nodes}})
+    prs, parents = sw.github_prs(GH_REPO, mine=True)
+    deps = sw.dependencies(prs, parents)
+    assert [pr.iid for pr in sw.merge_order(prs, deps)] == [6, 8, 9, 10]
+    assert sw.render_order(prs, deps) == (
+        f"Start with {pr_link(8)}. {pr_link(9)} is stacked on {pr_link(8)}."
+    )
+
+
+@pytest.mark.parametrize("text", ["#14:#15", "#14:15"])
+def test_after_pair_takes_a_pr_reference(text):
+    assert sw.after_pair(text) == (14, 15)
+
+
+def test_after_deps_link_a_pr_outside_the_message():
+    prs = [sw.parse_pr(pr_node(14))]
+    assert sw.after_deps(prs, [], [(14, 42)]) == [
+        sw.Dep(pr_ref(14), sw.AFTER, pr_ref(42))
+    ]
+
+
+def test_after_deps_name_a_pr_that_is_not_listed():
+    with pytest.raises(sw.SlackwriteError, match="#7 is not listed"):
+        sw.after_deps([sw.parse_pr(pr_node(1))], [], [(7, 1)])
