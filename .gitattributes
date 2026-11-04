@@ -1,0 +1,5 @@
+# Shell scripts keep LF on every checkout. Git for Windows converts line endings
+# to CRLF by default (core.autocrlf=true), and bash then fails on the first line
+# with "$'\r': command not found". List an extensionless script by its path.
+*.sh                        text eol=lf
+slackwrite/scripts/slackcopy text eol=lf
