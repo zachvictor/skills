@@ -4,9 +4,7 @@
 fake that records the call and answers `workitem view` with canned fields.
 """
 
-import io
 import json
-import sys
 from pathlib import Path
 
 import jira_ticket as jt
@@ -173,19 +171,6 @@ def test_config_may_start_with_a_byte_order_mark(tmp_path):
     path = tmp_path / "jira-ticket.toml"
     path.write_text(CONFIG, encoding="utf-8-sig")
     assert jt.load_config(path).default_profile == "general"
-
-
-def test_utf8_stdio_prints_what_a_windows_code_page_cannot(monkeypatch):
-    # A piped stdout on Windows uses the ANSI code page, which has no arrow.
-    raw = io.BytesIO()
-    # newline="\n" writes "\n" as is. Without it, Windows writes "\r\n".
-    stream = io.TextIOWrapper(raw, encoding="cp1252", newline="\n")
-    monkeypatch.setattr(sys, "stdout", stream)
-    monkeypatch.setattr(sys, "stderr", stream)
-    jt.utf8_stdio()
-    print("Summary:     Move rows → warehouse")
-    stream.flush()
-    assert raw.getvalue().decode("utf-8") == "Summary:     Move rows → warehouse\n"
 
 
 def test_placeholders():

@@ -5,6 +5,9 @@ renders for it, and nothing that is not Markdown syntax (snake_case names,
 `**kwargs` in code) is mistaken for formatting.
 """
 
+import io
+import sys
+
 import md_to_adf as m2a
 import pytest
 
@@ -363,3 +366,16 @@ def test_declared_types_are_exactly_what_convert_emits():
     walk(m2a.convert(md))
     assert nodes == m2a.NODE_TYPES
     assert marks == m2a.MARK_TYPES
+
+
+def test_utf8_stdio_prints_what_a_windows_code_page_cannot(monkeypatch):
+    # A piped stdout on Windows uses the ANSI code page, which has no arrow.
+    raw = io.BytesIO()
+    # newline="\n" writes "\n" as is. Without it, Windows writes "\r\n".
+    stream = io.TextIOWrapper(raw, encoding="cp1252", newline="\n")
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setattr(sys, "stderr", stream)
+    m2a.utf8_stdio()
+    print("Summary:     Move rows → warehouse")
+    stream.flush()
+    assert raw.getvalue().decode("utf-8") == "Summary:     Move rows → warehouse\n"

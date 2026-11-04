@@ -39,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import html
+import io
 import json
 import re
 import sys
@@ -573,9 +574,19 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    # Read and write UTF-8 even where the locale is a legacy code page (Windows).
+def utf8_stdio() -> None:
+    """Read and write UTF-8 on the standard streams, wherever the script runs.
+
+    On Windows, a piped stream, as when an agent runs a script, uses the ANSI
+    code page, which has no "→" and many other characters in a ticket. The
+    check also narrows the type for type checkers, and skips a stream that is
+    not a text file, such as None under pythonw or a test runner's stand-in.
+    """
     for stream in (sys.stdin, sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
+        if isinstance(stream, io.TextIOWrapper):
             stream.reconfigure(encoding="utf-8")
+
+
+if __name__ == "__main__":
+    utf8_stdio()
     sys.exit(main(sys.argv))

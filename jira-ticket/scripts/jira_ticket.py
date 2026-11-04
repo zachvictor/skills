@@ -718,17 +718,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-def utf8_stdio() -> None:
-    """Print UTF-8 wherever the script runs.
-
-    On Windows, a piped stdout, as when an agent runs the script, uses the ANSI
-    code page, which has no "\u2192" and many other characters in a ticket.
-    """
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8")
-
-
 if __name__ == "__main__":
-    utf8_stdio()
+    md_to_adf.utf8_stdio()
     sys.exit(main())
