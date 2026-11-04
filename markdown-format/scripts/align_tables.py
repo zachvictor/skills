@@ -19,10 +19,11 @@ import re
 import sys
 from pathlib import Path
 
-# The whole grammar this script recognizes, in one place. Every pattern is
-# used with `.match()`, which anchors at position 0 on its own; the leading `^`
-# is kept so each pattern states its own anchoring rather than relying on the
-# caller's choice of method.
+# The whole grammar this script recognizes, in one place. Every pattern used
+# with `.match()` anchors at position 0 on its own; the leading `^` is kept so
+# each pattern states its own anchoring rather than relying on the caller's
+# choice of method. `_DELIM` and `_EOL` are used with `.split()` and match
+# anywhere, so they have no anchor.
 
 # A separator cell is dashes with optional leading/trailing alignment colons.
 _SEP_CELL = re.compile(r"^:?-+:?$")
@@ -36,6 +37,10 @@ _DELIM = re.compile(r"(?<!\\)\|")
 # Line classifiers, both indifferent to indentation.
 _FENCE = re.compile(r"^\s*```")
 _ROW = re.compile(r"^\s*\|")
+
+# A line ending: the three that universal newlines recognizes. The capture group
+# makes `split()` keep each ending, so that `align()` can put it back.
+_EOL = re.compile(r"(\r\n|\r|\n)")
 
 # The leading whitespace run. `\s*` can match empty, so this always matches and
 # `.group()` needs no None guard.
@@ -88,34 +93,43 @@ def render(indent: str, rows: list[list[str]]) -> list[str]:
 
 
 def align(text: str) -> str:
-    """Return ``text`` with every Markdown table aligned."""
+    """Return ``text`` with every Markdown table aligned.
+
+    Each line keeps its own ending, so a CRLF or mixed file comes back as it was.
+    """
+    parts = _EOL.split(text)
     out: list[str] = []
     block: list[list[str]] = []
+    block_ends: list[str] = []
     indent = ""
     in_fence = False
 
     def flush() -> None:
-        nonlocal block
+        nonlocal block, block_ends
         if block:
-            out.extend(render(indent, block))
-            block = []
+            rows = render(indent, block)
+            out.extend(row + end for row, end in zip(rows, block_ends, strict=True))
+            block, block_ends = [], []
 
-    for line in text.split("\n"):
+    # The split alternates line, ending, line, ..., line. The last line has no
+    # ending: it is "" when the text ends with one.
+    for line, end in zip(parts[0::2], [*parts[1::2], ""], strict=True):
         if _FENCE.match(line):
             flush()
             in_fence = not in_fence
-            out.append(line)
+            out.append(line + end)
             continue
         if not in_fence and _ROW.match(line):
             row_indent, cells = split_row(line)
             if not block:
                 indent = row_indent
             block.append(cells)
+            block_ends.append(end)
             continue
         flush()
-        out.append(line)
+        out.append(line + end)
     flush()
-    return "\n".join(out)
+    return "".join(out)
 
 
 def main(paths: list[str]) -> int:
@@ -124,10 +138,12 @@ def main(paths: list[str]) -> int:
         return 2
     for name in paths:
         path = Path(name)
-        original = path.read_text(encoding="utf-8")
+        # Bytes, not text mode: text mode translates line endings on read, and
+        # on Windows on write too.
+        original = path.read_bytes().decode("utf-8")
         aligned = align(original)
         if aligned != original:
-            path.write_text(aligned, encoding="utf-8")
+            path.write_bytes(aligned.encode("utf-8"))
             print(f"aligned {name}")
     return 0
 

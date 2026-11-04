@@ -6,6 +6,7 @@ second half of that.
 """
 
 import align_tables as at
+import pytest
 
 
 def test_pads_columns_to_the_widest_cell():
@@ -193,6 +194,26 @@ def test_main_rewrites_only_files_that_change(tmp_path, capsys):
     assert "changed.md" in out
     assert "already.md" not in out
     assert already.read_text() == before
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_main_keeps_the_line_endings_of_the_file(tmp_path, eol):
+    # Text mode reads "\r\n" as "\n", and on Windows it writes "\n" as "\r\n".
+    # Compare bytes, so that neither translation can hide.
+    path = tmp_path / "table.md"
+    src = ["Intro", "", "| a | bbbb |", "|---|---|", "| ccccc | d |", ""]
+    path.write_bytes(eol.join(src).encode("utf-8"))
+
+    at.main([str(path)])
+
+    want = ["Intro", "", "| a     | bbbb |", "|-------|------|", "| ccccc | d    |", ""]
+    assert path.read_bytes() == eol.join(want).encode("utf-8")
+
+
+def test_each_line_keeps_its_own_ending():
+    src = "| a | b |\r\n|---|---|\n| cc | d |\r\nend\rlast"
+    out = at.align(src)
+    assert out == "| a  | b |\r\n|----|---|\n| cc | d |\r\nend\rlast"
 
 
 def test_main_without_paths_is_a_usage_error(capsys):

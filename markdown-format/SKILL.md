@@ -35,6 +35,8 @@ Specifically preserved:
 - **Alignment colons.** `:---`, `---:`, and `:---:` keep their meaning, and the
   dash count adjusts around them.
 - **Indentation.** A table nested inside a list item keeps its indent.
+- **Line endings.** Each line keeps its own ending, so a CRLF file stays CRLF
+  on every system, and a mixed file stays mixed.
 - **Escaped pipes.** `\|` inside a cell is content, not a column delimiter — in
   GFM that is the only way to put a literal pipe in a cell, so it is the whole
   escape grammar. Widths count `\|` as the two characters it occupies in the
