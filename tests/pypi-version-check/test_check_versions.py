@@ -504,3 +504,113 @@ def test_detect_parser_routing():
     assert cv.detect_parser(Path("requirements-dev.txt")) is cv.parse_requirements_txt
     assert cv.detect_parser(Path("environment.yaml")) is cv.parse_conda_env
     assert cv.detect_parser(Path("README.md")) is None
+
+
+# ---------------------------------------------------------------------------
+# Line endings. Text mode reads "\r\n" as "\n", and on Windows it writes "\n"
+# as "\r\n". These tests compare bytes, so that neither translation can hide.
+# ---------------------------------------------------------------------------
+
+LINE_ENDING_CASES = [
+    pytest.param(
+        cv.update_requirements_txt,
+        "requirements.txt",
+        ["# pins", "requests==2.28.0", ""],
+        ["# pins", "requests~=2.32.5", ""],
+        id="requirements",
+    ),
+    pytest.param(
+        cv.update_pyproject_toml,
+        "pyproject.toml",
+        [
+            "[project]",
+            'dependencies = ["requests>=2.28.0", "pytest"]',
+            "",
+            "[tool.poetry.dependencies]",
+            'flask = "^2.0.1"',
+            "",
+        ],
+        [
+            "[project]",
+            'dependencies = ["requests~=2.32.5", "pytest~=8.4.0"]',
+            "",
+            "[tool.poetry.dependencies]",
+            'flask = "~=3.1.0"',
+            "",
+        ],
+        id="pyproject",
+    ),
+    pytest.param(
+        cv.update_setup_cfg,
+        "setup.cfg",
+        ["[options]", "install_requires =", "    requests>=2.28.0", ""],
+        ["[options]", "install_requires =", "    requests~=2.32.5", ""],
+        id="setup-cfg",
+    ),
+    pytest.param(
+        cv.update_setup_py,
+        "setup.py",
+        ["setup(", '    install_requires=["requests>=2.28.0"],', ")", ""],
+        ["setup(", '    install_requires=["requests~=2.32.5"],', ")", ""],
+        id="setup-py",
+    ),
+    pytest.param(
+        cv.update_pipfile,
+        "Pipfile",
+        ["[packages]", 'requests = "==2.28.0"', ""],
+        ["[packages]", 'requests = "~=2.32.5"', ""],
+        id="pipfile",
+    ),
+    pytest.param(
+        cv.update_conda_env,
+        "environment.yml",
+        ["name: x", "dependencies:", "  - pip:", "    - requests==2.28.0", ""],
+        ["name: x", "dependencies:", "  - pip:", "    - requests~=2.32.5", ""],
+        id="conda",
+    ),
+]
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(("updater", "name", "src", "want"), LINE_ENDING_CASES)
+def test_updaters_keep_the_line_endings_of_the_file(
+    tmp_path, eol, updater, name, src, want
+):
+    path = tmp_path / name
+    path.write_bytes(eol.join(src).encode("utf-8"))
+    updater(path, UPDATES, "~=")
+    assert path.read_bytes() == eol.join(want).encode("utf-8")
+
+
+def test_each_line_keeps_its_own_ending(tmp_path):
+    path = tmp_path / "requirements.txt"
+    path.write_bytes(b"# pins\r\nrequests==2.28.0\nflask>=2.0\r\n")
+    cv.update_requirements_txt(path, UPDATES, "~=")
+    assert path.read_bytes() == b"# pins\r\nrequests~=2.32.5\nflask~=3.1.0\r\n"
+
+
+@pytest.mark.parametrize(
+    ("updater", "name", "src", "want"),
+    [
+        (
+            cv.update_requirements_txt,
+            "requirements.txt",
+            "requests==2.28.0",
+            "requests~=2.32.5",
+        ),
+        (
+            cv.update_pipfile,
+            "Pipfile",
+            'requests = "==2.28.0"',
+            'requests = "~=2.32.5"',
+        ),
+    ],
+    ids=["requirements", "pipfile"],
+)
+def test_a_file_without_a_final_newline_does_not_gain_one(
+    tmp_path, updater, name, src, want
+):
+    path = tmp_path / name
+    path.write_bytes(src.encode("utf-8"))
+    updater(path, UPDATES, "~=")
+    assert path.read_bytes() == want.encode("utf-8")

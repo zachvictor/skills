@@ -409,10 +409,37 @@ def detect_parser(path: Path):
 # Updaters — rewrite file with new versions
 # ---------------------------------------------------------------------------
 
+# A line ending: the three that universal newlines recognizes. The capture group
+# makes `split()` keep each ending, so that `write_source()` can put it back.
+_EOL = re.compile(r"(\r\n|\r|\n)")
+
+
+def read_source(path: Path) -> tuple[str, list[str]]:
+    """Return the file's text with "\\n" endings, and its own endings in order.
+
+    The updaters' patterns assume "\\n". Bytes, not text mode: text mode would
+    also normalize the endings, but then they could not be restored.
+    """
+    parts = _EOL.split(path.read_bytes().decode("utf-8"))
+    return "\n".join(parts[0::2]), parts[1::2]
+
+
+def write_source(path: Path, text: str, endings: list[str]) -> None:
+    """Write ``text`` back with each line's original ending.
+
+    The updaters edit within lines and never add or remove one, so the line
+    count still matches. `strict=True` turns a mismatch into an error rather
+    than a file with endings on the wrong lines.
+    """
+    lines = text.split("\n")
+    out = [line + end for line, end in zip(lines, [*endings, ""], strict=True)]
+    path.write_bytes("".join(out).encode("utf-8"))
+
 
 def update_requirements_txt(path: Path, updates: dict[str, str], operator: str):
     """Rewrite a requirements-style file with updated versions."""
-    lines = path.read_text(encoding="utf-8").splitlines()
+    text, endings = read_source(path)
+    lines = text.split("\n")
     new_lines = []
     for line in lines:
         stripped = line.split("#")[0].strip()
@@ -430,7 +457,7 @@ def update_requirements_txt(path: Path, updates: dict[str, str], operator: str):
                 new_lines.append(f"{pkg}{extras}{operator}{updates[pkg]}{comment}")
                 continue
         new_lines.append(line)
-    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    write_source(path, "\n".join(new_lines), endings)
 
 
 # A TOML string, either style. Basic strings honour backslash escapes; literal
@@ -522,7 +549,7 @@ def update_pyproject_toml(path: Path, updates: dict[str, str], operator: str):
     both Poetry spellings, in either quote style. The three passes are scoped
     to disjoint regions of the file, so they cannot rewrite each other's work.
     """
-    text = path.read_text(encoding="utf-8")
+    text, endings = read_source(path)
 
     # Unpinned PEP 621 entries: 'requests' → 'requests~=2.32.5'. Restricted to
     # dependency arrays (see _dep_array_spans) and to complete array elements,
@@ -594,24 +621,24 @@ def update_pyproject_toml(path: Path, updates: dict[str, str], operator: str):
                 )
         text = text[:start] + segment + text[end:]
 
-    path.write_text(text, encoding="utf-8")
+    write_source(path, text, endings)
 
 
 def update_setup_cfg(path: Path, updates: dict[str, str], operator: str):
     """Rewrite setup.cfg install_requires."""
-    text = path.read_text(encoding="utf-8")
+    text, endings = read_source(path)
     for pkg, ver in updates.items():
         pattern = re.compile(
             r"(" + re.escape(pkg) + _EXTRAS + r"\s*)" + _OP + r"\s*[0-9]\S*",
             re.IGNORECASE,
         )
         text = pattern.sub(lambda m, v=ver: m.group(1) + operator + v, text)
-    path.write_text(text, encoding="utf-8")
+    write_source(path, text, endings)
 
 
 def update_setup_py(path: Path, updates: dict[str, str], operator: str):
     """Rewrite setup.py install_requires."""
-    text = path.read_text(encoding="utf-8")
+    text, endings = read_source(path)
     for pkg, ver in updates.items():
         # Match inside quoted strings
         pattern = re.compile(
@@ -630,12 +657,13 @@ def update_setup_py(path: Path, updates: dict[str, str], operator: str):
             lambda m, v=ver: f"{m['q']}{m['name']}{operator}{v}{m['q']}",
             text,
         )
-    path.write_text(text, encoding="utf-8")
+    write_source(path, text, endings)
 
 
 def update_pipfile(path: Path, updates: dict[str, str], operator: str):
     """Rewrite Pipfile package versions."""
-    lines = path.read_text(encoding="utf-8").splitlines()
+    text, endings = read_source(path)
+    lines = text.split("\n")
     new_lines = []
     for line in lines:
         replaced = False
@@ -661,19 +689,19 @@ def update_pipfile(path: Path, updates: dict[str, str], operator: str):
                     break
         if not replaced:
             new_lines.append(line)
-    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    write_source(path, "\n".join(new_lines), endings)
 
 
 def update_conda_env(path: Path, updates: dict[str, str], operator: str):
     """Rewrite conda environment.yml pip section."""
-    text = path.read_text(encoding="utf-8")
+    text, endings = read_source(path)
     for pkg, ver in updates.items():
         pattern = re.compile(
             r"(-\s+" + re.escape(pkg) + _EXTRAS + r"\s*)" + _OP + r"\s*[0-9]\S*",
             re.IGNORECASE,
         )
         text = pattern.sub(lambda m, v=ver: m.group(1) + operator + v, text)
-    path.write_text(text, encoding="utf-8")
+    write_source(path, text, endings)
 
 
 UPDATERS = {
