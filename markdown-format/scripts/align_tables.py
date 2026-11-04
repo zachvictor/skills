@@ -14,6 +14,7 @@ Usage:
     python scripts/align-md-tables.py README.md docs/*.md
 """
 
+import io
 import re
 import sys
 from pathlib import Path
@@ -123,13 +124,18 @@ def main(paths: list[str]) -> int:
         return 2
     for name in paths:
         path = Path(name)
-        original = path.read_text()
+        original = path.read_text(encoding="utf-8")
         aligned = align(original)
         if aligned != original:
-            path.write_text(aligned)
+            path.write_text(aligned, encoding="utf-8")
             print(f"aligned {name}")
     return 0
 
 
 if __name__ == "__main__":
+    # On Windows, piped output uses the ANSI code page. The check also narrows
+    # sys.stdout for type checkers, and skips None under pythonw.
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8")
     raise SystemExit(main(sys.argv[1:]))

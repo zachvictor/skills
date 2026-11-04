@@ -22,6 +22,7 @@ Only stdlib — no pip, no jq, no third-party packages required.
 """
 
 import argparse
+import io
 import json
 import re
 import sys
@@ -91,7 +92,7 @@ _REQ_RE = re.compile(
 def parse_requirements_txt(path: Path) -> list[tuple[str, str | None]]:
     """Parse requirements.txt (also handles constraints files)."""
     deps = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.split("#")[0].strip()
         if not line or line.startswith("-"):
             continue
@@ -219,7 +220,7 @@ _POETRY_TABLE_RE = re.compile(
 
 def _parse_pyproject_toml_regex(path: Path) -> list[tuple[str, str | None]]:
     """Regex fallback for Python < 3.11 where tomllib is unavailable."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     deps = []
 
     for m in _PEP621_DEP_RE.finditer(text):
@@ -269,7 +270,7 @@ def parse_pyproject_toml(path: Path) -> list[tuple[str, str | None]]:
 
 def parse_setup_cfg(path: Path) -> list[tuple[str, str | None]]:
     """Parse setup.cfg [options] install_requires."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     deps = []
     in_deps = False
     for line in text.splitlines():
@@ -308,7 +309,7 @@ def parse_setup_cfg(path: Path) -> list[tuple[str, str | None]]:
 
 def parse_setup_py(path: Path) -> list[tuple[str, str | None]]:
     """Best-effort parse of setup.py install_requires list."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     deps = []
     # Find install_requires=[...] block
     m = re.search(r"install_requires\s*=\s*\[([^\]]*)\]", text, re.DOTALL)
@@ -322,7 +323,7 @@ def parse_setup_py(path: Path) -> list[tuple[str, str | None]]:
 
 def parse_pipfile(path: Path) -> list[tuple[str, str | None]]:
     """Parse Pipfile [packages] and [dev-packages] sections."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     deps = []
     in_section = False
     for line in text.splitlines():
@@ -345,7 +346,7 @@ def parse_pipfile(path: Path) -> list[tuple[str, str | None]]:
 
 def parse_conda_env(path: Path) -> list[tuple[str, str | None]]:
     """Parse conda environment.yml — extract pip dependencies section."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     deps = []
     in_pip = False
     for line in text.splitlines():
@@ -411,7 +412,7 @@ def detect_parser(path: Path):
 
 def update_requirements_txt(path: Path, updates: dict[str, str], operator: str):
     """Rewrite a requirements-style file with updated versions."""
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     new_lines = []
     for line in lines:
         stripped = line.split("#")[0].strip()
@@ -429,7 +430,7 @@ def update_requirements_txt(path: Path, updates: dict[str, str], operator: str):
                 new_lines.append(f"{pkg}{extras}{operator}{updates[pkg]}{comment}")
                 continue
         new_lines.append(line)
-    path.write_text("\n".join(new_lines) + "\n")
+    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
 # A TOML string, either style. Basic strings honour backslash escapes; literal
@@ -521,7 +522,7 @@ def update_pyproject_toml(path: Path, updates: dict[str, str], operator: str):
     both Poetry spellings, in either quote style. The three passes are scoped
     to disjoint regions of the file, so they cannot rewrite each other's work.
     """
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
 
     # Unpinned PEP 621 entries: 'requests' → 'requests~=2.32.5'. Restricted to
     # dependency arrays (see _dep_array_spans) and to complete array elements,
@@ -593,24 +594,24 @@ def update_pyproject_toml(path: Path, updates: dict[str, str], operator: str):
                 )
         text = text[:start] + segment + text[end:]
 
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
 
 
 def update_setup_cfg(path: Path, updates: dict[str, str], operator: str):
     """Rewrite setup.cfg install_requires."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     for pkg, ver in updates.items():
         pattern = re.compile(
             r"(" + re.escape(pkg) + _EXTRAS + r"\s*)" + _OP + r"\s*[0-9]\S*",
             re.IGNORECASE,
         )
         text = pattern.sub(lambda m, v=ver: m.group(1) + operator + v, text)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
 
 
 def update_setup_py(path: Path, updates: dict[str, str], operator: str):
     """Rewrite setup.py install_requires."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     for pkg, ver in updates.items():
         # Match inside quoted strings
         pattern = re.compile(
@@ -629,12 +630,12 @@ def update_setup_py(path: Path, updates: dict[str, str], operator: str):
             lambda m, v=ver: f"{m['q']}{m['name']}{operator}{v}{m['q']}",
             text,
         )
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
 
 
 def update_pipfile(path: Path, updates: dict[str, str], operator: str):
     """Rewrite Pipfile package versions."""
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     new_lines = []
     for line in lines:
         replaced = False
@@ -660,19 +661,19 @@ def update_pipfile(path: Path, updates: dict[str, str], operator: str):
                     break
         if not replaced:
             new_lines.append(line)
-    path.write_text("\n".join(new_lines) + "\n")
+    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
 def update_conda_env(path: Path, updates: dict[str, str], operator: str):
     """Rewrite conda environment.yml pip section."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     for pkg, ver in updates.items():
         pattern = re.compile(
             r"(-\s+" + re.escape(pkg) + _EXTRAS + r"\s*)" + _OP + r"\s*[0-9]\S*",
             re.IGNORECASE,
         )
         text = pattern.sub(lambda m, v=ver: m.group(1) + operator + v, text)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
 
 
 UPDATERS = {
@@ -793,4 +794,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # On Windows, piped output uses the ANSI code page, which has no "✅" or "⚠".
+    # The check also narrows sys.stdout for type checkers, and skips None under
+    # pythonw.
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8")
     main()
