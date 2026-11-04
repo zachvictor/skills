@@ -129,7 +129,7 @@ def load_config(path: Path | None = None) -> Config:
             f"no config at {path}; copy examples/jira-ticket.example.toml there"
         )
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except (tomllib.TOMLDecodeError, OSError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
 
@@ -273,7 +273,7 @@ def resolve_type(config: Config, project: str, wanted: str) -> str:
 
 def read_ticket_draft(path: Path) -> tuple[str, str]:
     """Return ``(summary, markdown_body)`` from a `# Summary` draft."""
-    first, _, rest = path.read_text(encoding="utf-8").partition("\n")
+    first, _, rest = path.read_text(encoding="utf-8-sig").partition("\n")
     m = _TITLE.match(first)
     if not m:
         raise DraftError(f"{path}: the first line must be '# <summary>'")
@@ -594,7 +594,7 @@ def cmd_transition(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_comment(args: argparse.Namespace, config: Config) -> int:
-    body = args.file.read_text(encoding="utf-8").strip("\n")
+    body = args.file.read_text(encoding="utf-8-sig").strip("\n")
     if not body.strip():
         raise DraftError(f"{args.file} is empty")
     doc = md_to_adf.convert(body)
@@ -718,5 +718,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
+def utf8_stdio() -> None:
+    """Print UTF-8 wherever the script runs.
+
+    On Windows, a piped stdout, as when an agent runs the script, uses the ANSI
+    code page, which has no "\u2192" and many other characters in a ticket.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 if __name__ == "__main__":
+    utf8_stdio()
     sys.exit(main())

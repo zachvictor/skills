@@ -46,6 +46,8 @@ You can also use Vercel's [`skills`](https://github.com/vercel-labs/skills) CLI 
 npx skills add https://github.com/zachvictor/skills --skill commit-msg
 ```
 
+[jira-ticket](./jira-ticket/README.md) needs more setup, such as a CLI and a config file. Its setup page also covers GitHub Copilot and Windows.
+
 ## Structure
 
 Each skill is a self-contained directory following the [Agent Skills specification](https://agentskills.io/specification):

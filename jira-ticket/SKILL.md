@@ -2,9 +2,9 @@
 name: jira-ticket
 description: >
   Create, update, transition, and comment on Jira tickets from the CLI via `acli`, using
-  Markdown drafts such as a ticket directory's `jira.md`. Converts the Markdown to Atlassian
-  Document Format and applies per-profile defaults (project, type, assignee, parent epic,
-  labels) from ~/.claude/jira-ticket.toml, choosing the profile from the repo's GitLab path.
+  Markdown drafts such as `jira.md`. Converts the Markdown to Atlassian Document Format
+  and applies per-profile defaults (project, type, assignee, parent epic, labels) from
+  ~/.claude/jira-ticket.toml, choosing the profile from the repo's GitLab path.
   Use this skill whenever you write to Jira: filing a ticket, posting a draft, changing a
   ticket's summary or description, moving a ticket to another status, or adding a comment.
   Also use it when you draft or edit a `jira.md` or a Jira comment: it lists the Markdown
@@ -35,6 +35,11 @@ A write to Jira is outward-facing, like a push or a posted MR. Treat it the same
 
 `python3 ~/.claude/skills/jira-ticket/scripts/jira_ticket.py <subcommand>`
 
+If this skill is installed in another folder, such as `~/.copilot/skills/jira-ticket`, use
+that folder in place of `~/.claude/skills/jira-ticket`. The script needs Python 3.11 or
+later. On Windows, `python3` is often missing or opens the Microsoft Store; run `py -3` or
+`python` instead.
+
 | Subcommand                                   | Purpose                                                       |
 |----------------------------------------------|---------------------------------------------------------------|
 | `defaults [--profile P] [--repo PATH]`       | Print the profile that applies, the reason, and the epic      |
@@ -51,8 +56,9 @@ description in Markdown. This is the `jira.md` format.
 
 ## Config
 
-The script reads `$JIRA_TICKET_CONFIG`, else `~/.claude/jira-ticket.toml`. The file lives
-outside the skill because the site, the project, and the epic keys are private. See
+The script reads `$JIRA_TICKET_CONFIG`, else `~/.claude/jira-ticket.toml`, whichever agent
+runs it. On Windows, `~` is the user profile folder, such as `C:\Users\name`. The file
+lives outside the skill because the site, the project, and the epic keys are private. See
 `examples/jira-ticket.example.toml` for the format.
 
 - A **profile** holds the defaults for one kind of work: project, type, assignee, parent

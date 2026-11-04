@@ -559,7 +559,9 @@ def _merge(nodes: list[dict]) -> list[dict]:
 
 def main(argv: list[str]) -> int:
     source = (
-        Path(argv[1]).read_text(encoding="utf-8") if len(argv) > 1 else sys.stdin.read()
+        Path(argv[1]).read_text(encoding="utf-8-sig")
+        if len(argv) > 1
+        else sys.stdin.read()
     )
     try:
         doc = convert(source)
@@ -572,4 +574,8 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    # Read and write UTF-8 even where the locale is a legacy code page (Windows).
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     sys.exit(main(sys.argv))
