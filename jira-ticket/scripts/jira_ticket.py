@@ -207,6 +207,7 @@ def repo_path(repo: str | None) -> str | None:
         ["git", "-C", repo or ".", "remote", "get-url", "origin"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if proc.returncode != 0:
         return None
@@ -327,7 +328,12 @@ def describe(doc: dict) -> str:
 
 
 def run_acli(args: list[str]) -> str:
-    proc = subprocess.run(["acli", "jira", *args], capture_output=True, text=True)
+    proc = subprocess.run(
+        ["acli", "jira", *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()
         raise AcliError(
