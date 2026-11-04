@@ -44,6 +44,9 @@ Run it from inside the repo working tree:
 
 `~/.claude/skills/slackwrite/scripts/slackwrite.py <type> [options]`
 
+If this skill is installed in another folder, such as `~/.codex/skills/slackwrite`, use
+that folder in place of `~/.claude/skills/slackwrite`. This applies to `find_leads.py` too.
+
 | Command                         | The message covers                                               |
 |---------------------------------|------------------------------------------------------------------|
 | `slackwrite.py mr`              | The open MR whose source branch is the current branch's upstream |

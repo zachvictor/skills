@@ -7,7 +7,7 @@ description: Composes a Conventional Commits message for staged changes, appends
 
 1. Review the currently staged changes (`git diff --cached`).
 2. Compose a Conventional Commits message.
-3. Run `~/.claude/skills/commit-msg/scripts/append-msg.sh "<message>"` to append it to `tmp/commit-msgs.txt` and copy it to the clipboard.
+3. Run `~/.claude/skills/commit-msg/scripts/append-msg.sh "<message>"` to append it to `tmp/commit-msgs.txt` and copy it to the clipboard. If this skill is installed in another folder, such as `~/.codex/skills/commit-msg`, use that folder in place of `~/.claude/skills/commit-msg`.
 
 # Guidelines
 

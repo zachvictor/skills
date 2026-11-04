@@ -13,6 +13,10 @@ description: Formats Markdown source for readability without reflowing prose. Cu
    python3 ~/.claude/skills/markdown-format/scripts/align_tables.py <file>...
    ```
 
+   If this skill is installed in another folder, such as
+   `~/.codex/skills/markdown-format`, use that folder in place of
+   `~/.claude/skills/markdown-format`.
+
    It prints one line per file it changed and stays silent for files that were
    already correct, so a second run producing no output confirms convergence.
 3. Report which files changed. Do not describe the diff cell by cell.

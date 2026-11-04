@@ -57,6 +57,9 @@ Always invoke the script using `~/.claude/skills/...` — not the resolved absol
 This matters because the user's permission rules match against the command string as
 written, and `~/...` won't match `/Users/someone/...` or `/home/someone/...`.
 
+If this skill is installed in another folder, such as `~/.codex/skills/pypi-version-check`,
+use that folder in place of `~/.claude/skills/pypi-version-check`.
+
 That's it. The script will:
 1. Parse the file and extract all packages and their versions.
 2. Query PyPI in parallel for the latest version of each package.
