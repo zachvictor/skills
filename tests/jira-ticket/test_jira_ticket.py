@@ -178,7 +178,8 @@ def test_config_may_start_with_a_byte_order_mark(tmp_path):
 def test_utf8_stdio_prints_what_a_windows_code_page_cannot(monkeypatch):
     # A piped stdout on Windows uses the ANSI code page, which has no arrow.
     raw = io.BytesIO()
-    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    # newline="\n" writes "\n" as is. Without it, Windows writes "\r\n".
+    stream = io.TextIOWrapper(raw, encoding="cp1252", newline="\n")
     monkeypatch.setattr(sys, "stdout", stream)
     monkeypatch.setattr(sys, "stderr", stream)
     jt.utf8_stdio()
