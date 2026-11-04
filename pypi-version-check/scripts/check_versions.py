@@ -88,13 +88,29 @@ _REQ_RE = re.compile(
     re.MULTILINE,
 )
 
+# A direct reference, `pkg @ https://...`. It names its own source, so it has no
+# PyPI version to compare against or to write.
+_DIRECT_REF_RE = re.compile(r"^\s*" + _NAME + r"(?:\s*\[.*?\])?\s*@")
+
+# A specifier list, and a requirement line split where it goes. `head` is the
+# indent, name, and extras. `spec` is the list, such as "==2.28.0", ">=2.0,<3.0",
+# or PEP 508's parenthesized "(>=2.0)", and is None when the line has none.
+# Whatever follows `spec` (environment markers, a line continuation, a comment)
+# is not matched, so an update keeps it as it was.
+_SPEC = _OP + r"\s*[^\s,;#\\()]+"
+_SPECS = _SPEC + r"(?:\s*,\s*" + _SPEC + r")*"
+_REQ_LINE_RE = re.compile(
+    r"^(?P<head>\s*(?P<name>" + _NAME + r")(?:\s*\[.*?\])?)"
+    r"(?:\s*(?P<spec>\(\s*" + _SPECS + r"\s*\)|" + _SPECS + r"))?"
+)
+
 
 def parse_requirements_txt(path: Path) -> list[tuple[str, str | None]]:
     """Parse requirements.txt (also handles constraints files)."""
     deps = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.split("#")[0].strip()
-        if not line or line.startswith("-"):
+        if not line or line.startswith("-") or _DIRECT_REF_RE.match(line):
             continue
         m = _REQ_RE.match(line)
         if m:
@@ -437,25 +453,23 @@ def write_source(path: Path, text: str, endings: list[str]) -> None:
 
 
 def update_requirements_txt(path: Path, updates: dict[str, str], operator: str):
-    """Rewrite a requirements-style file with updated versions."""
+    """Rewrite a requirements-style file with updated versions.
+
+    Only the specifiers change. The indent, the extras, environment markers,
+    a line continuation, and a comment stay as they were. A line without a
+    specifier gets one after its name and extras.
+    """
     text, endings = read_source(path)
-    lines = text.split("\n")
     new_lines = []
-    for line in lines:
-        stripped = line.split("#")[0].strip()
-        if stripped and not stripped.startswith("-"):
-            m = _REQ_RE.match(stripped)
-            if m and m.group(1) in updates:
-                pkg = m.group(1)
-                extras = ""
-                extras_m = re.search(r"(\[.*?\])", stripped)
-                if extras_m:
-                    extras = extras_m.group(1)
-                comment = ""
-                if "#" in line:
-                    comment = "  " + line[line.index("#") :]
-                new_lines.append(f"{pkg}{extras}{operator}{updates[pkg]}{comment}")
-                continue
+    for line in text.split("\n"):
+        m = _REQ_LINE_RE.match(line)
+        if m and m["name"] in updates and not _DIRECT_REF_RE.match(line):
+            spec = f"{operator}{updates[m['name']]}"
+            if m["spec"] is None:
+                at = m.end("head")
+                line = line[:at] + spec + line[at:]
+            else:
+                line = line[: m.start("spec")] + spec + line[m.end("spec") :]
         new_lines.append(line)
     write_source(path, "\n".join(new_lines), endings)
 

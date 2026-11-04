@@ -614,3 +614,51 @@ def test_a_file_without_a_final_newline_does_not_gain_one(
     path.write_bytes(src.encode("utf-8"))
     updater(path, UPDATES, "~=")
     assert path.read_bytes() == want.encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# requirements.txt: an update changes the specifiers and nothing else.
+# ---------------------------------------------------------------------------
+
+REQUIREMENT_LINE_CASES = [
+    pytest.param(
+        'requests==2.28.0 ; python_version >= "3.8"',
+        'requests~=2.32.5 ; python_version >= "3.8"',
+        id="marker",
+    ),
+    pytest.param(
+        "  flask>=2.0    # web", "  flask~=3.1.0    # web", id="indent-comment"
+    ),
+    pytest.param("requests >= 2.28.0", "requests ~=2.32.5", id="spaced-operator"),
+    pytest.param("requests>=2.0,<3.0", "requests~=2.32.5", id="specifier-list"),
+    pytest.param("requests (>=2.0, <3.0)", "requests ~=2.32.5", id="parenthesized"),
+    pytest.param("flask[async] >=2.0", "flask[async] ~=3.1.0", id="extras"),
+    pytest.param("requests==2.28.0 \\", "requests~=2.32.5 \\", id="continuation"),
+    pytest.param(
+        'pytest ; python_version >= "3.8"',
+        'pytest~=8.4.0 ; python_version >= "3.8"',
+        id="unpinned-marker",
+    ),
+    pytest.param("pytest  # tests", "pytest~=8.4.0  # tests", id="unpinned-comment"),
+    pytest.param(
+        "requests @ https://example.com/requests.whl",
+        "requests @ https://example.com/requests.whl",
+        id="direct-reference",
+    ),
+    pytest.param("    --hash=sha256:abc", "    --hash=sha256:abc", id="hash-line"),
+    pytest.param("requests-oauthlib==1.0", "requests-oauthlib==1.0", id="longer-name"),
+]
+
+
+@pytest.mark.parametrize(("src", "want"), REQUIREMENT_LINE_CASES)
+def test_requirements_update_changes_only_the_specifiers(tmp_path, src, want):
+    path = tmp_path / "requirements.txt"
+    path.write_bytes(f"{src}\n".encode())
+    cv.update_requirements_txt(path, UPDATES, "~=")
+    assert path.read_bytes() == f"{want}\n".encode()
+
+
+def test_requirements_parser_skips_a_direct_reference(tmp_path):
+    path = tmp_path / "requirements.txt"
+    path.write_bytes(b"requests @ https://example.com/requests.whl\nflask>=2.0\n")
+    assert cv.parse_requirements_txt(path) == [("flask", "2.0")]
