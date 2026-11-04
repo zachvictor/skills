@@ -31,14 +31,14 @@ start. The user's git diff is the review layer — there is no need to pause for
 
 ## Supported file formats
 
-| File                  | Format                  | Notes                                     |
-|-----------------------|-------------------------|--------------------------------------------|
-| `requirements.txt`    | pip requirements        | Also `requirements-dev.txt`, constraints   |
-| `pyproject.toml`      | PEP 621 / Poetry        | Handles both standards                     |
-| `setup.cfg`           | setuptools declarative  | `[options]` install_requires               |
-| `setup.py`            | setuptools imperative   | Best-effort regex parse                    |
-| `Pipfile`             | Pipenv                  | `[packages]` and `[dev-packages]`          |
-| `environment.yml`     | Conda + pip             | Parses the `pip:` section                  |
+| File               | Format                 | Notes                                    |
+|--------------------|------------------------|------------------------------------------|
+| `requirements.txt` | pip requirements       | Also `requirements-dev.txt`, constraints |
+| `pyproject.toml`   | PEP 621 / Poetry       | Handles both standards                   |
+| `setup.cfg`        | setuptools declarative | `[options]` install_requires             |
+| `setup.py`         | setuptools imperative  | Best-effort regex parse                  |
+| `Pipfile`          | Pipenv                 | `[packages]` and `[dev-packages]`        |
+| `environment.yml`  | Conda + pip            | Parses the `pip:` section                |
 
 ## How to use
 
@@ -76,13 +76,13 @@ allows `>=2.3.1, <2.4.0` — patch updates yes, minor-version jumps no.
 
 Use context to pick the right operator:
 
-| Context                        | Operator  | Flag                  |
-|--------------------------------|-----------|-----------------------|
-| Most projects (default)        | `~=`      | (none needed)         |
-| Poetry projects                | `^`       | `--operator "^"`      |
-| Docker/CI lockfiles            | `==`      | `--operator "=="`     |
-| Libraries (permissive)         | `>=`      | `--operator ">="`     |
-| User explicitly requests one   | (theirs)  | `--operator "..."`    |
+| Context                      | Operator | Flag               |
+|------------------------------|----------|--------------------|
+| Most projects (default)      | `~=`     | (none needed)      |
+| Poetry projects              | `^`      | `--operator "^"`   |
+| Docker/CI lockfiles          | `==`     | `--operator "=="`  |
+| Libraries (permissive)       | `>=`     | `--operator ">="`  |
+| User explicitly requests one | (theirs) | `--operator "..."` |
 
 If the existing file already uses a consistent operator style, match it rather than
 overriding with the default.

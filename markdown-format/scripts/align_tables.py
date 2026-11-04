@@ -11,7 +11,7 @@ An escaped pipe (`\|`) is cell content, not a delimiter — in GFM that is the
 only way to put a literal pipe in a cell, so it is the whole escape grammar.
 
 Usage:
-    python scripts/align-md-tables.py README.md docs/*.md
+    python3 scripts/align_tables.py README.md docs/*.md
 """
 
 import io
