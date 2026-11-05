@@ -317,6 +317,15 @@ def unconvertible(doc: dict | None) -> list[str]:
     return sorted(found)
 
 
+def checked(doc: dict | None) -> list[str]:
+    """The text of each checked box in ``doc``, in order."""
+    return [
+        "".join(n.get("text", "") for n in _walk(node))
+        for node in (_walk(doc) if doc else ())
+        if node["type"] == "taskItem" and node["attrs"]["state"] == "DONE"
+    ]
+
+
 def describe(doc: dict) -> str:
     """Summarize the top-level blocks of an ADF document for a plan."""
     counts = Counter(node["type"] for node in doc["content"])
@@ -530,6 +539,17 @@ def cmd_update(args: argparse.Namespace, config: Config) -> int:
                 f"WARNING: the description in Jira has {', '.join(lost)}, which no"
                 " draft can express. Sending replaces them."
             )
+        # People check boxes in Jira as work moves on, so a draft falls behind.
+        in_draft = set(checked(doc))
+        if unchecks := [
+            t for t in checked(current.get("description")) if t not in in_draft
+        ]:
+            print(
+                "WARNING: these boxes are checked in Jira but not in the draft."
+                " Sending unchecks them:"
+            )
+            for text in unchecks:
+                print(f"  - {text}")
     if args.show_adf and doc is not None:
         print(json.dumps(doc, indent=2, ensure_ascii=False))
     if args.dry_run:

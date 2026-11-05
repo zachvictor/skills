@@ -156,11 +156,13 @@ The Jira editor shows a link in one of five forms. Choose the form by where the 
 the draft was written, so check first:
 
 1. Read the ticket: `acli jira workitem view KEY --json --fields summary,description,status`.
-2. If Jira has text that the draft lacks, add that text to the draft, or ask the user.
+2. If Jira has text that the draft lacks, add that text to the draft, or ask the user. Mark
+   each box that is checked in Jira as `[x]` in the draft.
 3. Run `update KEY --file <dir>/jira.md --dry-run`, then send on authorization.
 
 If the dry run warns that the description in Jira has content no draft can express, such as
-a Card or an Embed link, do not send. Ask the user.
+a Card or an Embed link, do not send. Ask the user. If it warns that boxes checked in Jira
+are not checked in the draft, check them in the draft, or ask the user.
 
 To change only the type, run `update KEY --type <T> --dry-run`.
 

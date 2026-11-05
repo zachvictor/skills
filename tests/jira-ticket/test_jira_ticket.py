@@ -298,6 +298,25 @@ def test_unconvertible_names_what_markdown_cannot_reproduce():
     assert jt.unconvertible(None) == []
 
 
+def test_checked_lists_the_text_of_checked_boxes():
+    doc = md_to_adf.convert("- [x] **a** b\n- [ ] c\n  - [x] d")
+    assert jt.checked(doc) == ["a b", "d"]
+    assert jt.checked(None) == []
+
+
+def test_update_warns_before_unchecking_a_box(config, monkeypatch, tmp_path, capsys):
+    stored = md_to_adf.convert("- [x] done\n- [x] kept\n- [ ] open")
+    fields = {"summary": "S", "status": {"name": "To Do"}, "description": stored}
+    monkeypatch.setattr(jt, "fetch", lambda key, fields_=None: fields)
+    path = draft(tmp_path, "# S\n\n- [ ] done\n- [x] kept\n- [x] open\n")
+    argv = ["update", "ACME-1", "--file", str(path), "--dry-run"]
+    assert run(config, monkeypatch, argv) == 0
+    out = capsys.readouterr().out
+    assert "checked in Jira but not in the draft" in out
+    assert "  - done\n" in out
+    assert "  - kept" not in out and "  - open" not in out
+
+
 def test_update_warns_before_replacing_unconvertible_content(
     config, monkeypatch, tmp_path, capsys
 ):
