@@ -89,7 +89,8 @@ usually a self-reference to remove.
 
 ## Markdown for drafts
 
-The converter reads CommonMark with GFM tables. Use any of this in `jira.md` and comments:
+The converter reads CommonMark with GFM tables and task lists. Use any of this in `jira.md`
+and comments:
 
 | Write                                                                                 | Jira shows                                                      |
 |---------------------------------------------------------------------------------------|-----------------------------------------------------------------|
@@ -101,6 +102,7 @@ The converter reads CommonMark with GFM tables. Use any of this in `jira.md` and
 | `&amp;`, `&rarr;`, `&#8594;`                                                          | The character                                                   |
 | `` `code` `` and fenced code blocks                                                   | Code. A fence's language is kept. Long lines wrap.              |
 | Lists, tables, block quotes, `---` after a blank line                                 | The same                                                        |
+| `- [ ] open` and `- [x] done`                                                         | Checkboxes. `[x]` checks the box.                               |
 
 Rules:
 
@@ -112,6 +114,9 @@ Rules:
 - **Code inside bold loses the bold**, because the Jira editor cannot show both marks.
 - **ADF forbids some nestings**, such as a table or a heading in a list item. The script
   stops with an error that names the nesting.
+- **A task item holds one paragraph.** Nest task items under it, but not other lists, more
+  paragraphs, or code. ADF has no numbered task list, so `1. [ ]` loses its number. Write
+  `\[ ]` to keep the brackets as text.
 - **Dunder names need code spans.** As in CommonMark, `__init__` renders as bold "init".
 - Other syntax stays literal text.
 

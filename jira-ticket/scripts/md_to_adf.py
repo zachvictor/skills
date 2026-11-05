@@ -9,6 +9,9 @@ Markdown that ticket drafts use:
 - ATX (`#`) and setext (`===`, `---` underline) headings, paragraphs, and
   hard breaks (two trailing spaces or a backslash)
 - bullet and ordered lists, nested by indentation
+- GFM task list items (`- [ ]`, `- [x]`), as Jira checkboxes. A run of task
+  items becomes a `taskList`. ADF has no numbered task list, so a task item in
+  an ordered list loses its number.
 - fenced code blocks with an optional language
 - block quotes and thematic breaks (`---`)
 - GFM pipe tables
@@ -40,9 +43,11 @@ from __future__ import annotations
 
 import html
 import io
+import itertools
 import json
 import re
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -67,6 +72,9 @@ _ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-*+]|(?P<num>\d{1,9})[.)])"
     r"(?P<gap>[ \t]+|$)(?P<text>.*)$"
 )
+# A GFM task list marker at the start of a list item's text. Whitespace must
+# follow it, so "[ ]x" stays text.
+_TASK = re.compile(r"^\[(?P<state>[ \txX])\](?:[ \t]+|$)")
 # A delimiter row has at least one pipe, so a bare `---` stays a thematic break.
 _TABLE_SEP = re.compile(
     r"^(?=.*\|)[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$"
@@ -109,7 +117,9 @@ _INLINE = re.compile(
 )
 
 # The block types ADF accepts inside each container.
-_LIST_ITEM_CHILDREN = {"paragraph", "bulletList", "orderedList", "codeBlock"}
+_LIST_ITEM_CHILDREN = {
+    "paragraph", "bulletList", "orderedList", "taskList", "codeBlock",
+}  # fmt: skip
 _QUOTE_CHILDREN = {"paragraph", "bulletList", "orderedList", "codeBlock"}
 
 # Everything `convert` can emit. A Jira description with other types (a Card or
@@ -118,7 +128,7 @@ _QUOTE_CHILDREN = {"paragraph", "bulletList", "orderedList", "codeBlock"}
 NODE_TYPES = frozenset(
     {
         "doc", "paragraph", "text", "hardBreak", "heading", "rule", "blockquote",
-        "bulletList", "orderedList", "listItem", "codeBlock",
+        "bulletList", "orderedList", "listItem", "taskList", "taskItem", "codeBlock",
         "table", "tableRow", "tableHeader", "tableCell", "inlineCard", "blockCard",
     }
 )  # fmt: skip
@@ -233,7 +243,10 @@ def _blocks(lines: list[str], refs: dict[str, str]) -> list[dict]:
         elif _QUOTE.match(line):
             node, i = _blockquote(lines, i, refs)
         elif _ITEM.match(line):
-            node, i = _list(lines, i, refs)
+            # Several lists when the list mixes task items and other items.
+            lists, i = _list(lines, i, refs)
+            out += lists
+            continue
         else:
             node, i = _paragraph(lines, i, refs)
         out.append(node)
@@ -332,19 +345,26 @@ def _blockquote(lines: list[str], i: int, refs: dict[str, str]) -> tuple[dict, i
     return {"type": "blockquote", "content": content}, i
 
 
-def _list(lines: list[str], i: int, refs: dict[str, str]) -> tuple[dict, int]:
+def _list(lines: list[str], i: int, refs: dict[str, str]) -> tuple[list[dict], int]:
+    """Parse one Markdown list into one or more ADF lists.
+
+    A run of task items becomes a `taskList`, and a run of other items stays a
+    bullet or ordered list. A list that mixes the two becomes several lists.
+    """
     m = _ITEM.match(lines[i])
     assert m is not None  # the caller matched this line
     ordered = m["num"] is not None
-    items: list[dict] = []
     first_number = int(m["num"]) if ordered else 0
+    # For each item: whether it is a task, and its ADF nodes.
+    items: list[tuple[bool, list[dict]]] = []
 
     while True:
         gap = len(m["gap"].expandtabs(4))
         # A gap of 5+ columns would start indented code in CommonMark; treat
         # it as one space plus indented text instead.
         offset = _indent(lines[i]) + len(m["marker"]) + (gap if 1 <= gap <= 4 else 1)
-        body = [m["text"]]
+        task = _TASK.match(m["text"])
+        body = [m["text"][task.end() :] if task else m["text"]]
         i += 1
         while i < len(lines):
             line = lines[i]
@@ -360,7 +380,11 @@ def _list(lines: list[str], i: int, refs: dict[str, str]) -> tuple[dict, int]:
             else:
                 break
             i += 1
-        items.append(_list_item(_blocks(body, refs)))
+        content = _blocks(body, refs)
+        if task:
+            items.append((True, _task_item(content, task["state"])))
+        else:
+            items.append((False, [_list_item(content)]))
 
         nxt = _next_nonblank(lines, i)
         sibling = _ITEM.match(lines[nxt]) if nxt is not None else None
@@ -372,13 +396,44 @@ def _list(lines: list[str], i: int, refs: dict[str, str]) -> tuple[dict, int]:
             break
         i, m = nxt, sibling
 
-    if ordered:
-        return {
-            "type": "orderedList",
-            "attrs": {"order": first_number},
-            "content": items,
-        }, i
-    return {"type": "bulletList", "content": items}, i
+    out: list[dict] = []
+    number = first_number
+    for is_task, run in itertools.groupby(items, key=lambda item: item[0]):
+        group = list(run)
+        nodes = [node for _, item_nodes in group for node in item_nodes]
+        if is_task:
+            attrs = {"localId": _local_id()}
+            out.append({"type": "taskList", "attrs": attrs, "content": nodes})
+        elif ordered:
+            attrs = {"order": number}
+            out.append({"type": "orderedList", "attrs": attrs, "content": nodes})
+        else:
+            out.append({"type": "bulletList", "content": nodes})
+        number += len(group)
+    return out, i
+
+
+def _task_item(content: list[dict], state: str) -> list[dict]:
+    """Return a task item, followed by the task lists nested under it.
+
+    ADF keeps a task item to inline content, so the item takes the inline
+    content of its first paragraph. A nested task list follows the item as a
+    sibling in the same `taskList`. Other blocks have no place in a task list.
+    """
+    inline: list[dict] = []
+    if content and content[0]["type"] == "paragraph":
+        inline, content = content[0]["content"], content[1:]
+    _require(content, {"taskList"}, "a task item")
+    attrs = {"localId": _local_id(), "state": "TODO" if state.isspace() else "DONE"}
+    return [{"type": "taskItem", "attrs": attrs, "content": inline}, *content]
+
+
+def _local_id() -> str:
+    """ADF requires a `localId` on each task list and task item.
+
+    A random UUID is unique without bookkeeping.
+    """
+    return str(uuid.uuid4())
 
 
 def _list_item(content: list[dict]) -> dict:

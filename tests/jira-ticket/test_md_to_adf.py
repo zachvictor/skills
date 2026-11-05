@@ -341,6 +341,111 @@ def test_table_in_list_item_is_rejected():
         blocks("- item\n\n  | a |\n  |---|\n  | 1 |")
 
 
+def tasks(node):
+    """The (state, text) pairs of the task items under ``node``, in order."""
+    if node["type"] == "taskItem":
+        return [(node["attrs"]["state"], "".join(t for t, _ in texts(node)))]
+    return [pair for child in node.get("content", []) for pair in tasks(child)]
+
+
+def test_task_list_items_become_checkboxes():
+    (tl,) = blocks("- [ ] open\n- [x] done\n* [X] also\n- [ ] one\ncontinued")
+    assert tl["type"] == "taskList"
+    assert tasks(tl) == [
+        ("TODO", "open"),
+        ("DONE", "done"),
+        ("DONE", "also"),
+        ("TODO", "one continued"),
+    ]
+
+
+def test_task_item_holds_inline_content_with_marks():
+    (tl,) = blocks("- [ ] **ship** `v2` [notes](https://e.com)")
+    (item,) = tl["content"]
+    assert texts(item) == [
+        ("ship", ["strong"]),
+        (" ", []),
+        ("v2", ["code"]),
+        (" ", []),
+        ("notes", ["link"]),
+    ]
+
+
+def test_every_task_list_and_item_has_its_own_local_id():
+    doc = m2a.convert("- [ ] a\n  - [ ] b\n- [x] c\n\ntext\n\n- [ ] d")
+    ids = []
+
+    def walk(n):
+        if n["type"] in ("taskList", "taskItem"):
+            ids.append(n["attrs"]["localId"])
+        for c in n.get("content", []):
+            walk(c)
+
+    walk(doc)
+    assert len(ids) == 7 and all(ids) and len(set(ids)) == len(ids)
+
+
+def test_empty_task_item_has_no_content():
+    (tl,) = blocks("- [ ]")
+    assert tl["content"][0]["content"] == []
+    assert tl["content"][0]["attrs"]["state"] == "TODO"
+
+
+def test_nested_task_list_follows_its_item():
+    (tl,) = blocks("- [ ] a\n  - [x] b\n- [ ] c")
+    assert [n["type"] for n in tl["content"]] == ["taskItem", "taskList", "taskItem"]
+    assert tasks(tl) == [("TODO", "a"), ("DONE", "b"), ("TODO", "c")]
+
+
+def test_task_list_nested_in_a_plain_item():
+    (ul,) = blocks("- a\n  - [ ] b")
+    (item,) = ul["content"]
+    assert [b["type"] for b in item["content"]] == ["paragraph", "taskList"]
+
+
+def test_mixed_list_splits_into_runs():
+    lists = blocks("- a\n- [ ] b\n- [x] c\n- d")
+    assert [n["type"] for n in lists] == ["bulletList", "taskList", "bulletList"]
+    assert tasks(lists[1]) == [("TODO", "b"), ("DONE", "c")]
+
+
+def test_ordered_runs_keep_their_numbers():
+    lists = blocks("3. a\n4. [ ] b\n5. c\n6. d")
+    assert [n["type"] for n in lists] == ["orderedList", "taskList", "orderedList"]
+    assert lists[0]["attrs"] == {"order": 3} and lists[2]["attrs"] == {"order": 5}
+    assert len(lists[2]["content"]) == 2
+
+
+@pytest.mark.parametrize(
+    "md, where",
+    [
+        ("- [ ] a\n  - b", "bulletList inside a task item"),
+        ("- [ ] a\n\n  more", "paragraph inside a task item"),
+        ("- [ ] a\n\n  ```\n  x\n  ```", "codeBlock inside a task item"),
+        ("> - [ ] a", "taskList inside a block quote"),
+    ],
+)
+def test_task_item_rejects_what_adf_cannot_nest(md, where):
+    with pytest.raises(m2a.ConversionError, match=where):
+        blocks(md)
+
+
+@pytest.mark.parametrize(
+    "md, text",
+    [
+        ("- [ ]x", "[ ]x"),
+        ("- [] a", "[] a"),
+        ("- [y] a", "[y] a"),
+        ("- \\[ ] a", "[ ] a"),
+        ("[ ] a", "[ ] a"),
+    ],
+)
+def test_not_a_task_marker_stays_text(md, text):
+    (node,) = blocks(md)
+    assert node["type"] != "taskList"
+    assert "".join(t for t, _ in texts(node)) == text
+
+
 def test_declared_types_are_exactly_what_convert_emits():
     md = "\n\n".join(
         [
@@ -349,6 +454,7 @@ def test_declared_types_are_exactly_what_convert_emits():
             "> q",
             "---",
             "- a\n\n1. b",
+            "- [ ] t",
             "```\ncode\n```",
             "| a |\n|---|\n| b |",
             "- <https://e.com>",
