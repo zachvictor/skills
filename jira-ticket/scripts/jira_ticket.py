@@ -25,8 +25,10 @@ A profile carries the defaults for a kind of work: project, type, assignee,
 parent epic, and labels. The profile is chosen in this order:
 
 1. --profile on the command line
-2. the profile whose `gitlab_paths` match the git remote of the repo, by
-   whole path segments (the longest match wins)
+2. the profile whose `repo_paths` match the path of the repo's origin remote,
+   by whole path segments (the longest match wins). The host does not count,
+   so a profile can list GitLab and GitHub paths. `gitlab_paths` is the old
+   name of `repo_paths` and still works.
 3. `default_profile`
 """
 
@@ -81,7 +83,7 @@ class Profile:
     assignee: str | None
     parent: str | None
     labels: tuple[str, ...]
-    gitlab_paths: tuple[str, ...]
+    repo_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,14 @@ def load_config(path: Path | None = None) -> Config:
         if not isinstance(table, dict):
             raise ConfigError(f"{where} must be a table")
         assignee, parent = table.get("assignee"), table.get("parent")
+        # `gitlab_paths` is the old name. A config written before the rename
+        # still loads, but one profile may not use both names.
+        if "repo_paths" in table and "gitlab_paths" in table:
+            raise ConfigError(
+                f"{where} sets both 'repo_paths' and 'gitlab_paths';"
+                " move the paths to 'repo_paths'"
+            )
+        paths_key = "gitlab_paths" if "gitlab_paths" in table else "repo_paths"
         profiles[name] = Profile(
             name=name,
             project=_string(table.get("project"), f"{where} 'project'"),
@@ -161,9 +171,9 @@ def load_config(path: Path | None = None) -> Config:
             if parent is None
             else _string(parent, f"{where} 'parent'", pattern=_KEY),
             labels=_strings(table.get("labels"), f"{where} 'labels'", pattern=_LABEL),
-            gitlab_paths=tuple(
+            repo_paths=tuple(
                 p.strip("/")
-                for p in _strings(table.get("gitlab_paths"), f"{where} 'gitlab_paths'")
+                for p in _strings(table.get(paths_key), f"{where} '{paths_key}'")
             ),
         )
 
@@ -177,13 +187,13 @@ def load_config(path: Path | None = None) -> Config:
 
     claimed: dict[str, str] = {}
     for profile in profiles.values():
-        for gitlab_path in profile.gitlab_paths:
-            if gitlab_path in claimed:
+        for prefix in profile.repo_paths:
+            if prefix in claimed:
                 raise ConfigError(
-                    f"{path}: profiles {claimed[gitlab_path]!r} and {profile.name!r}"
-                    f" both claim {gitlab_path!r}"
+                    f"{path}: profiles {claimed[prefix]!r} and {profile.name!r}"
+                    f" both claim {prefix!r}"
                 )
-            claimed[gitlab_path] = profile.name
+            claimed[prefix] = profile.name
 
     default = data.get("default_profile")
     if default is not None and default not in profiles:
@@ -202,7 +212,10 @@ def load_config(path: Path | None = None) -> Config:
 
 
 def repo_path(repo: str | None) -> str | None:
-    """The GitLab project path of the origin remote, or None outside a repo."""
+    """The path of the origin remote, without the host, or None if there is none.
+
+    That is `group/subgroup/project` on GitLab and `owner/repo` on GitHub.
+    """
     proc = subprocess.run(
         ["git", "-C", repo or ".", "remote", "get-url", "origin"],
         capture_output=True,
@@ -228,17 +241,17 @@ def resolve_profile(
         return config.profiles[explicit], "chosen with --profile"
     if project_path:
         matches = [
-            (gitlab_path, profile)
+            (prefix, profile)
             for profile in config.profiles.values()
-            for gitlab_path in profile.gitlab_paths
-            if project_path == gitlab_path or project_path.startswith(gitlab_path + "/")
+            for prefix in profile.repo_paths
+            if project_path == prefix or project_path.startswith(prefix + "/")
         ]
         if matches:
-            gitlab_path, profile = max(matches, key=lambda pair: len(pair[0]))
-            return profile, f"repo {project_path} is under {gitlab_path}"
+            prefix, profile = max(matches, key=lambda pair: len(pair[0]))
+            return profile, f"repo {project_path} is under {prefix}"
     if config.default_profile:
         if project_path:
-            reason = f"default; repo {project_path} matches no gitlab_paths"
+            reason = f"default; repo {project_path} matches no repo_paths"
         else:
             reason = "default; no git remote here"
         return config.profiles[config.default_profile], reason

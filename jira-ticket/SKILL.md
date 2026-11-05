@@ -4,7 +4,7 @@ description: >
   Create, update, transition, and comment on Jira tickets from the CLI via `acli`, using
   Markdown drafts such as `jira.md`. Converts the Markdown to Atlassian Document Format
   and applies per-profile defaults (project, type, assignee, parent epic, labels) from
-  ~/.claude/jira-ticket.toml, choosing the profile from the repo's GitLab path.
+  ~/.claude/jira-ticket.toml, choosing the profile from the repo's remote path.
   Use this skill whenever you write to Jira: filing a ticket, posting a draft, changing a
   ticket's summary or description, moving a ticket to another status, or adding a comment.
   Also use it when you draft or edit a `jira.md` or a Jira comment: it lists the Markdown
@@ -64,7 +64,9 @@ lives outside the skill because the site, the project, and the epic keys are pri
 - A **profile** holds the defaults for one kind of work: project, type, assignee, parent
   epic, and labels.
 - The script chooses the profile in this order: `--profile`, then the profile whose
-  `gitlab_paths` match the origin remote of the repo, then `default_profile`.
+  `repo_paths` match the path of the repo's origin remote, then `default_profile`. The
+  host does not count, so one profile can list GitLab and GitHub paths. `gitlab_paths` is
+  the old name of `repo_paths` and still works.
 - `[project.<KEY>] types` and `statuses` are the shortlists for a Jira project. The
   comments next to them say when each one applies. Read them before you choose.
 

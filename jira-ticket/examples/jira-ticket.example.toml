@@ -4,10 +4,12 @@
 # The skill picks a profile in this order:
 #
 # 1. --profile on the command line
-# 2. the profile whose gitlab_paths match the origin remote of the repo, by
-#    whole path segments: "acme/platform/data" matches
+# 2. the profile whose repo_paths match the path of the repo's origin remote,
+#    by whole path segments: "acme/platform/data" matches
 #    "acme/platform/data/etl" but not "acme/platform/data-archive". The
-#    longest match wins.
+#    longest match wins. The host does not count, so a path can be a GitLab
+#    group or project, or a GitHub owner or repo. Older configs call this key
+#    gitlab_paths, and that name still works.
 # 3. default_profile
 
 # The Jira Cloud site, used to print ticket links.
@@ -34,7 +36,7 @@ type = "Task"           # optional; defaults to "Task"
 assignee = "@me"        # an email, an account ID, or @me
 parent = "ACME-100"     # the epic new tickets go under
 labels = ["data"]
-gitlab_paths = ["acme/platform/data"]
+repo_paths = ["acme/platform/data"]
 
 # No parent and no labels. Select it with --profile acme.
 [profile.acme]

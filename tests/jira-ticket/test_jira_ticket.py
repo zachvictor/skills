@@ -31,11 +31,11 @@ project = "ACME"
 assignee = "@me"
 parent = "ACME-100"
 labels = ["data"]
-gitlab_paths = ["acme/data"]
+repo_paths = ["acme/data"]
 
 [profile.etl]
 project = "ACME"
-gitlab_paths = ["acme/data/etl"]
+repo_paths = ["acme/data/etl"]
 """
 
 
@@ -88,7 +88,13 @@ def test_example_config_loads():
         ('default_profile = "nope"\n', "names no"),
         ('[profile.x]\nproject = "A"\nparent = "not-a-key"\n', "not valid"),
         ('[profile.x]\nproject = "A"\nlabels = ["two words"]\n', "not valid"),
-        ('[profile.x]\nproject = "A"\ngitlab_paths = ["acme/data/"]\n', "both claim"),
+        ('[profile.x]\nproject = "A"\nrepo_paths = ["acme/data/"]\n', "both claim"),
+        ('[profile.x]\nproject = "A"\ngitlab_paths = ["acme/data"]\n', "both claim"),
+        (
+            '[profile.x]\nproject = "A"\n'
+            'repo_paths = ["a/b"]\ngitlab_paths = ["a/c"]\n',
+            "both 'repo_paths' and 'gitlab_paths'",
+        ),
     ],
 )
 def test_bad_config_fails_loudly(tmp_path, extra, message):
@@ -100,6 +106,17 @@ def test_bad_config_fails_loudly(tmp_path, extra, message):
     )
     with pytest.raises(jt.ConfigError, match=message):
         jt.load_config(path)
+
+
+def test_gitlab_paths_is_the_old_name_of_repo_paths(tmp_path):
+    path = tmp_path / "c.toml"
+    old = CONFIG.replace(
+        'repo_paths = ["acme/data/etl"]', 'gitlab_paths = ["acme/data/etl"]'
+    )
+    path.write_text(old, encoding="utf-8")
+    config = jt.load_config(path)
+    assert config.profiles["etl"].repo_paths == ("acme/data/etl",)
+    assert jt.resolve_profile(config, None, "acme/data/etl/jobs")[0].name == "etl"
 
 
 def test_missing_config_names_the_example(tmp_path):
@@ -138,6 +155,21 @@ def test_explicit_profile_wins(config):
 )
 def test_remote_path(remote):
     assert jt._REMOTE.match(remote)["path"] == "acme/data/etl"
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "git@github.com:acme/data-etl.git",
+        "https://github.com/acme/data-etl",
+        "ssh://git@ssh.github.com:443/acme/data-etl.git",
+        "https://x-access-token:abc@github.com/acme/data-etl.git",
+        "git@github-work:acme/data-etl.git",  # an ~/.ssh/config host alias
+        "https://github.example.com/acme/data-etl.git/",  # GitHub Enterprise
+    ],
+)
+def test_github_remote_path(remote):
+    assert jt._REMOTE.match(remote)["path"] == "acme/data-etl"
 
 
 @pytest.mark.parametrize(
