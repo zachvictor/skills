@@ -5,6 +5,8 @@
 # Markdown input is converted with pandoc (GFM), then tuned for
 # Slack's paste normalizer:
 #   - spaces touching a link become &nbsp; (Slack eats plain ones)
+#   - the newline after each <br /> is removed (Slack pastes it as a
+#     leading space on the next line)
 #   - top-level blocks get an explicit <p><br></p> between them
 #     (Slack drops blank lines implied by paragraph margins)
 # HTML input (.html/.htm) is copied verbatim: author it pre-tuned.
@@ -41,10 +43,12 @@ else
 fi
 
 tune_html() {
-  # &nbsp;-guard spaces that abut anchors, then insert <p><br></p>
-  # between top-level blocks (depth-tracked so nested <p> inside
-  # lists/blockquotes don't get separators).
-  perl -pe 's{ <a\b}{&nbsp;<a}g; s{</a> }{</a>&nbsp;}g' |
+  # &nbsp;-guard spaces that abut anchors and join each line that
+  # follows a <br /> onto it (slurp mode, so the substitution can see
+  # the newline). Then insert <p><br></p> between top-level blocks
+  # (depth-tracked so nested <p> inside lists/blockquotes don't get
+  # separators).
+  perl -0777 -pe 's{ <a\b}{&nbsp;<a}g; s{</a> }{</a>&nbsp;}g; s{<br />\n}{<br />}g' |
     awk '
       {
         if (depth == 0 && $0 ~ /^<(p|ul|ol|h[1-6]|blockquote|pre|table|hr)([ >\/]|$)/) {
