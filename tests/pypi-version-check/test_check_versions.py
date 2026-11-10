@@ -283,13 +283,6 @@ def test_poetry_dependency_version_extraction(tmp_path, line, expected):
     assert cv.parse_pyproject_toml(path) == expected
 
 
-@pytest.mark.parametrize(("line", "expected"), POETRY_DEP_CASES)
-def test_regex_fallback_agrees_on_poetry_dependency_shapes(tmp_path, line, expected):
-    path = tmp_path / "pyproject.toml"
-    path.write_text(f"[tool.poetry.dependencies]\npython = '^3.11'\n{line}\n")
-    assert cv._parse_pyproject_toml_regex(path) == expected
-
-
 def test_unpinned_poetry_dependency_gets_pinned(tmp_path):
     src = "[tool.poetry.dependencies]\npython = '^3.11'\nrequests = '*'\n"
     assert update(tmp_path, src) == (
@@ -366,66 +359,8 @@ def test_dep_array_spans_covers_a_multiline_array_with_nested_brackets():
 
 
 # ---------------------------------------------------------------------------
-# Regex fallback parser (the Python < 3.11 path, where tomllib is absent).
-# Its failure mode is quiet: no deps parsed means the CLI prints
-# "No dependencies found" and exits 0.
+# The pyproject.toml parser reads every table that holds dependencies.
 # ---------------------------------------------------------------------------
-
-FALLBACK_CASES = [
-    pytest.param(
-        '[project]\ndependencies = ["requests>=2.28.0", "flask~=2.0"]\n',
-        [("requests", "2.28.0"), ("flask", "2.0")],
-        id="pep621-double",
-    ),
-    pytest.param(
-        "[project]\ndependencies = ['requests>=2.28.0', 'flask~=2.0']\n",
-        [("requests", "2.28.0"), ("flask", "2.0")],
-        id="pep621-single",
-    ),
-    pytest.param(
-        "[tool.poetry.dependencies]\npython = '^3.11'\nrequests = '^2.28.0'\n",
-        [("requests", "2.28.0")],
-        id="poetry-simple-single",
-    ),
-    pytest.param(
-        "[tool.poetry.dependencies]\nrequests = {version = '^2.28.0'}\n",
-        [("requests", "2.28.0")],
-        id="poetry-table-single",
-    ),
-    pytest.param(
-        '[tool.poetry.dependencies]\nrequests = {version = "^2.28.0"}\n',
-        [("requests", "2.28.0")],
-        id="poetry-table-double",
-    ),
-]
-
-
-@pytest.mark.parametrize(("src", "expected"), FALLBACK_CASES)
-def test_regex_fallback_parser_reads_both_quote_styles(tmp_path, src, expected):
-    path = tmp_path / "pyproject.toml"
-    path.write_text(src)
-    assert cv._parse_pyproject_toml_regex(path) == expected
-
-
-def test_regex_fallback_agrees_with_tomllib_on_a_single_quoted_file(tmp_path):
-    src = (
-        "[project]\n"
-        "dependencies = ['requests>=2.28.0']\n"
-        "\n"
-        "[tool.poetry.dependencies]\n"
-        "flask = '^2.0.1'\n"
-    )
-    path = tmp_path / "pyproject.toml"
-    path.write_text(src)
-    fallback = cv._parse_pyproject_toml_regex(path)
-    assert fallback == cv._parse_pyproject_toml_tomllib(path)
-
-
-def test_regex_fallback_skips_config_keys_outside_dependency_sections(tmp_path):
-    src = "[tool.ruff]\ntarget-version = 'py312'\nline-length = 88\n"
-    path = tmp_path / "pyproject.toml"
-    path.write_text(src)
-    assert cv._parse_pyproject_toml_regex(path) == []
 
 
 def test_pyproject_parser_reads_every_dependency_table(tmp_path):

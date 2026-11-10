@@ -26,6 +26,7 @@ import io
 import json
 import re
 import sys
+import tomllib
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -73,7 +74,7 @@ _EXTRAS = r"(?:\[.*?\])?"  # optional extras, e.g. [security]
 _OP = r"(?:[~=!<>^]=?|===?)"  # PEP 440 / Poetry comparison operator
 
 # TOML permits either quote style for strings, and ruff's quote-style='single'
-# emits single-quoted pyproject.toml files. Patterns that read or rewrite a TOML
+# emits single-quoted pyproject.toml files. Patterns that rewrite a TOML
 # string capture the opening quote as `q` and close on the `(?P=q)`
 # backreference, so a quote of one style can never be paired with the other.
 _QOPEN = r"(?P<q>['\"])"
@@ -152,13 +153,8 @@ def _parse_poetry_deps(
     return deps
 
 
-def _parse_pyproject_toml_tomllib(path: Path) -> list[tuple[str, str | None]] | None:
-    """Try parsing with tomllib (Python 3.11+). Returns None if unavailable."""
-    try:
-        import tomllib
-    except ImportError:
-        return None
-
+def parse_pyproject_toml(path: Path) -> list[tuple[str, str | None]]:
+    """Parse pyproject.toml: PEP 621, PEP 735, uv, and Poetry dependencies."""
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
@@ -202,86 +198,6 @@ def _parse_pyproject_toml_tomllib(path: Path) -> list[tuple[str, str | None]] | 
         deps.extend(_parse_poetry_deps(group.get("dependencies", {})))
 
     return deps
-
-
-# Regex for detecting Poetry dependency section headers
-_POETRY_DEP_SECTION_RE = re.compile(
-    r"^\[tool\.poetry\.(?:dependencies|dev-dependencies|group\.[^]]+\.dependencies)\]",
-    re.MULTILINE,
-)
-
-# PEP 621: dependencies = ["requests>=2.28", 'flask~=2.0']
-# These are string items inside arrays — safe to grab globally because only
-# dependency strings look like "package>=version" inside quotes.
-_PEP621_DEP_RE = re.compile(
-    _QOPEN + r"(?P<dep>" + _NAME + _EXTRAS + r"\s*" + _OP + r"\s*[0-9]" + _QBODY + r")"
-    r"" + _QCLOSE
-)
-
-# Poetry: key = "^2.28"  /  key = {version = '^2.28', ...}
-_POETRY_SIMPLE_RE = re.compile(
-    r"^(" + _NAME + r")\s*=\s*" + _QOPEN + r"(?P<ver>" + _QBODY + r")" + _QCLOSE
-)
-_POETRY_TABLE_RE = re.compile(
-    r"^("
-    + _NAME
-    + r")\s*=\s*\{[^}]*version\s*=\s*"
-    + _QOPEN
-    + r"(?P<ver>"
-    + _QBODY
-    + r")"
-    + _QCLOSE
-)
-
-
-def _parse_pyproject_toml_regex(path: Path) -> list[tuple[str, str | None]]:
-    """Regex fallback for Python < 3.11 where tomllib is unavailable."""
-    text = path.read_text(encoding="utf-8")
-    deps = []
-
-    for m in _PEP621_DEP_RE.finditer(text):
-        rm = _REQ_RE.match(m.group("dep"))
-        if rm:
-            deps.append((rm.group(1), rm.group(3) or None))
-
-    # Poetry deps are matched only inside Poetry dependency sections, to avoid
-    # picking up config keys like requires-python, target-version, etc.
-    seen = {d[0].lower() for d in deps}
-    lines = text.splitlines()
-    in_poetry_deps = False
-    for line in lines:
-        stripped = line.strip()
-        # Track which TOML section we're in
-        if stripped.startswith("["):
-            in_poetry_deps = bool(_POETRY_DEP_SECTION_RE.match(stripped))
-            continue
-        if not in_poetry_deps:
-            continue
-
-        # Both patterns require a quoted version string, so a git/path/url
-        # dependency has nothing for them to match and is skipped here too.
-        m_inline = _POETRY_SIMPLE_RE.match(stripped) or _POETRY_TABLE_RE.match(stripped)
-        if m_inline:
-            name, ver_str = m_inline.group(1), m_inline.group("ver")
-            if name.lower() in seen or name.lower() == "python":
-                continue
-            ver = re.sub(r"[^0-9.]", "", ver_str).strip(".")
-            deps.append((name, ver or None))
-            seen.add(name.lower())
-
-    return deps
-
-
-def parse_pyproject_toml(path: Path) -> list[tuple[str, str | None]]:
-    """Parse pyproject.toml — handles PEP 621 dependencies and Poetry.
-
-    Uses tomllib (Python 3.11+) when available for accurate parsing,
-    with a regex fallback for older Python versions.
-    """
-    result = _parse_pyproject_toml_tomllib(path)
-    if result is not None:
-        return result
-    return _parse_pyproject_toml_regex(path)
 
 
 def parse_setup_cfg(path: Path) -> list[tuple[str, str | None]]:
@@ -470,6 +386,11 @@ def update_requirements_txt(path: Path, updates: dict[str, str], operator: str):
 _TOML_STRING_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 _TABLE_HEADER_RE = re.compile(r"^[ \t]*\[([^][]+)\][ \t]*(?:#.*)?$")
 _ARRAY_OPEN_RE = re.compile(r"^[ \t]*(?P<key>" + _NAME + r")[ \t]*=[ \t]*\[")
+# The header of a Poetry dependency table.
+_POETRY_DEP_SECTION_RE = re.compile(
+    r"^\[tool\.poetry\.(?:dependencies|dev-dependencies|group\.[^]]+\.dependencies)\]",
+    re.MULTILINE,
+)
 
 # Tables in which *every* array-valued key holds dependency strings.
 _DEP_TABLES = frozenset({"project.optional-dependencies", "dependency-groups"})
