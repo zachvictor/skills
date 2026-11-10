@@ -84,7 +84,24 @@ same path works for Claude Code and for Copilot:
 | macOS and Linux | `~/.claude/jira-ticket.toml`             |
 | Windows         | `%USERPROFILE%\.claude\jira-ticket.toml` |
 
-Copy the example there and replace its values. macOS or Linux:
+If your team keeps a config file in a repo, include it, and do not copy it. A copy goes stale
+when the team changes a profile, such as when an epic closes. Clone the team's repo, then
+write a config with an `[[include]]` table that points at your clone:
+
+```toml
+# ~/.claude/jira-ticket.toml
+[[include]]
+repo = "~/src/acme/platform/data"
+ref = "origin/main"
+path = "docs/jira-ticket.toml"
+```
+
+The script reads the file as committed at `ref`, not from the working tree. With a remote
+branch such as `origin/main`, the file is as current as your last `git fetch` in the clone.
+On Windows, write `repo` with forward slashes. [`examples/include.example.toml`](./examples/include.example.toml) gives the rules,
+and shows how to replace a team profile with your own.
+
+Otherwise, copy the example there and replace its values. macOS or Linux:
 
 ```bash
 cp ~/.claude/skills/jira-ticket/examples/jira-ticket.example.toml ~/.claude/jira-ticket.toml

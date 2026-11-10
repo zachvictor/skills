@@ -21,6 +21,11 @@ Config, in order: $JIRA_TICKET_CONFIG, then ~/.claude/jira-ticket.toml. It
 lives outside the skill directory because the skill is shareable and the
 site, project, and epic keys are not. See examples/jira-ticket.example.toml.
 
+The config can include team config files. Each `[[include]]` table names a
+git checkout, a ref, and a path, and the file is read as committed at that
+ref. Team files must agree with each other. The personal config may replace
+any key or table in them. See examples/include.example.toml.
+
 A profile carries the defaults for a kind of work: project, type, assignee,
 parent epic, and labels. The profile is chosen in this order:
 
@@ -43,7 +48,7 @@ import sys
 import tempfile
 import tomllib
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import md_to_adf
@@ -84,6 +89,23 @@ class Profile:
     parent: str | None
     labels: tuple[str, ...]
     repo_paths: tuple[str, ...]
+    # The config file that the profile came from, and the team file whose
+    # profile of the same name it replaces. They are not part of the value,
+    # so two files that define the same profile compare equal.
+    source: str = field(default="", compare=False)
+    replaces: str | None = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class Include:
+    """A team config file, as committed at ``ref`` in the checkout ``repo``."""
+
+    repo: str
+    ref: str
+    path: str
+
+    def __str__(self) -> str:
+        return f"{self.repo} {self.ref}:{self.path}"
 
 
 @dataclass(frozen=True)
@@ -124,6 +146,120 @@ def _strings(
     return tuple(_string(item, where, pattern=pattern) for item in value)
 
 
+def _profile(name: str, table: object, where: str) -> Profile:
+    if not isinstance(table, dict):
+        raise ConfigError(f"{where} must be a table")
+    assignee, parent = table.get("assignee"), table.get("parent")
+    # `gitlab_paths` is the old name. A config written before the rename
+    # still loads, but one profile may not use both names.
+    if "repo_paths" in table and "gitlab_paths" in table:
+        raise ConfigError(
+            f"{where} sets both 'repo_paths' and 'gitlab_paths';"
+            " move the paths to 'repo_paths'"
+        )
+    paths_key = "gitlab_paths" if "gitlab_paths" in table else "repo_paths"
+    return Profile(
+        name=name,
+        project=_string(table.get("project"), f"{where} 'project'"),
+        type=_string(table.get("type", "Task"), f"{where} 'type'"),
+        assignee=None if assignee is None else _string(assignee, f"{where} 'assignee'"),
+        parent=None
+        if parent is None
+        else _string(parent, f"{where} 'parent'", pattern=_KEY),
+        labels=_strings(table.get("labels"), f"{where} 'labels'", pattern=_LABEL),
+        repo_paths=tuple(
+            p.strip("/")
+            for p in _strings(table.get(paths_key), f"{where} '{paths_key}'")
+        ),
+    )
+
+
+# What one config file defines, keyed by (table, name). The top-level keys
+# are ("site", "") and ("default_profile", ""); the tables are
+# ("project", KEY) and ("profile", NAME).
+_Key = tuple[str, str]
+
+
+def _definitions(data: dict, source: str) -> dict[_Key, object]:
+    found: dict[_Key, object] = {}
+    for key in ("site", "default_profile"):
+        if key in data:
+            found[(key, "")] = _string(data[key], f"{source}: {key!r}")
+    for key, table in (data.get("project") or {}).items():
+        where = f"{source}: [project.{key}]"
+        if not isinstance(table, dict):
+            raise ConfigError(f"{where} must be a table")
+        found[("project", key)] = (
+            _strings(table.get("statuses"), f"{where} 'statuses'"),
+            _strings(table.get("types"), f"{where} 'types'"),
+        )
+    for name, table in (data.get("profile") or {}).items():
+        found[("profile", name)] = _profile(name, table, f"{source}: [profile.{name}]")
+    return found
+
+
+def _shown(key: _Key) -> str:
+    table, name = key
+    return f"[{table}.{name}]" if name else repr(table)
+
+
+_INCLUDE_KEYS = ("repo", "ref", "path")
+
+
+def _includes(data: dict, source: str) -> list[Include]:
+    entries = data.get("include", [])
+    if not isinstance(entries, list):
+        raise ConfigError(f"{source}: write each include as an [[include]] table")
+    includes = []
+    for n, entry in enumerate(entries, 1):
+        where = f"{source}: include {n}"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be an [[include]] table")
+        if missing := [k for k in _INCLUDE_KEYS if k not in entry]:
+            raise ConfigError(f"{where} lacks {', '.join(missing)}")
+        if unknown := sorted(set(entry) - set(_INCLUDE_KEYS)):
+            raise ConfigError(f"{where} has unknown keys: {', '.join(unknown)}")
+        include = Include(
+            **{k: _string(entry[k], f"{where} {k!r}") for k in _INCLUDE_KEYS}
+        )
+        if not Path(include.repo).expanduser().is_absolute():
+            raise ConfigError(f"{where} 'repo' must be absolute or start with ~")
+        includes.append(include)
+    return includes
+
+
+def read_include(include: Include) -> str:
+    """The team file's text as committed at the include's ref.
+
+    Not the working tree, so the checkout's current branch does not matter.
+    The file is as current as the ref, which for a remote branch is the last
+    fetch.
+    """
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(Path(include.repo).expanduser()),
+            "cat-file",
+            "blob",
+            f"{include.ref}:{include.path}",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if proc.returncode != 0:
+        raise ConfigError(f"cannot read {include}: {proc.stderr.strip()}")
+    return proc.stdout.removeprefix("\ufeff")
+
+
+def _toml(text: str, source: str) -> dict:
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"cannot read {source}: {exc}") from exc
+
+
 def load_config(path: Path | None = None) -> Config:
     path = path or config_path()
     if not path.is_file():
@@ -131,74 +267,72 @@ def load_config(path: Path | None = None) -> Config:
             f"no config at {path}; copy examples/jira-ticket.example.toml there"
         )
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
-    except (tomllib.TOMLDecodeError, OSError) as exc:
+        data = _toml(path.read_text(encoding="utf-8-sig"), str(path))
+    except OSError as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
 
-    site = _string(data.get("site"), f"{path}: 'site'")
-
-    statuses: dict[str, tuple[str, ...]] = {}
-    types: dict[str, tuple[str, ...]] = {}
-    for key, table in (data.get("project") or {}).items():
-        where = f"{path}: [project.{key}]"
-        if not isinstance(table, dict):
-            raise ConfigError(f"{where} must be a table")
-        statuses[key] = _strings(table.get("statuses"), f"{where} 'statuses'")
-        types[key] = _strings(table.get("types"), f"{where} 'types'")
-
-    profiles: dict[str, Profile] = {}
-    for name, table in (data.get("profile") or {}).items():
-        where = f"{path}: [profile.{name}]"
-        if not isinstance(table, dict):
-            raise ConfigError(f"{where} must be a table")
-        assignee, parent = table.get("assignee"), table.get("parent")
-        # `gitlab_paths` is the old name. A config written before the rename
-        # still loads, but one profile may not use both names.
-        if "repo_paths" in table and "gitlab_paths" in table:
+    # The team files must agree with each other, so their order does not
+    # matter. A definition that two of them share must be the same in both.
+    values: dict[_Key, object] = {}
+    sources: dict[_Key, str] = {}
+    for include in _includes(data, str(path)):
+        team = _toml(read_include(include), str(include))
+        if "include" in team:
             raise ConfigError(
-                f"{where} sets both 'repo_paths' and 'gitlab_paths';"
-                " move the paths to 'repo_paths'"
+                f"{include}: includes do not nest; list each team file in {path}"
             )
-        paths_key = "gitlab_paths" if "gitlab_paths" in table else "repo_paths"
-        profiles[name] = Profile(
-            name=name,
-            project=_string(table.get("project"), f"{where} 'project'"),
-            type=_string(table.get("type", "Task"), f"{where} 'type'"),
-            assignee=None
-            if assignee is None
-            else _string(assignee, f"{where} 'assignee'"),
-            parent=None
-            if parent is None
-            else _string(parent, f"{where} 'parent'", pattern=_KEY),
-            labels=_strings(table.get("labels"), f"{where} 'labels'", pattern=_LABEL),
-            repo_paths=tuple(
-                p.strip("/")
-                for p in _strings(table.get(paths_key), f"{where} '{paths_key}'")
-            ),
-        )
+        for key, value in _definitions(team, str(include)).items():
+            if key in values and values[key] != value:
+                raise ConfigError(
+                    f"{sources[key]} and {include} disagree on {_shown(key)};"
+                    " make them agree, or remove it from one"
+                )
+            values.setdefault(key, value)
+            sources.setdefault(key, str(include))
+
+    # The personal config may replace any definition in the team files.
+    replaced: dict[_Key, str] = {}
+    for key, value in _definitions(data, str(path)).items():
+        if key in values and values[key] != value:
+            replaced[key] = sources[key]
+        values[key] = value
+        sources[key] = str(path)
+
+    site = values.get(("site", ""))
+    if site is None:
+        raise ConfigError(f"{path}: set 'site' here or in an included team file")
+    profiles = {
+        key[1]: replace(value, source=sources[key], replaces=replaced.get(key))
+        for key, value in values.items()
+        if key[0] == "profile"
+    }
+    projects = {key[1]: value for key, value in values.items() if key[0] == "project"}
+    statuses = {key: value[0] for key, value in projects.items()}
+    types = {key: value[1] for key, value in projects.items()}
 
     for profile in profiles.values():
         allowed = types.get(profile.project, ())
         if allowed and profile.type not in allowed:
             raise ConfigError(
-                f"{path}: [profile.{profile.name}] type {profile.type!r}"
+                f"{profile.source}: [profile.{profile.name}] type {profile.type!r}"
                 f" is not in [project.{profile.project}] types"
             )
 
-    claimed: dict[str, str] = {}
+    claimed: dict[str, Profile] = {}
     for profile in profiles.values():
         for prefix in profile.repo_paths:
-            if prefix in claimed:
+            if other := claimed.get(prefix):
                 raise ConfigError(
-                    f"{path}: profiles {claimed[prefix]!r} and {profile.name!r}"
-                    f" both claim {prefix!r}"
+                    f"profiles {other.name!r} ({other.source}) and"
+                    f" {profile.name!r} ({profile.source}) both claim {prefix!r}"
                 )
-            claimed[prefix] = profile.name
+            claimed[prefix] = profile
 
-    default = data.get("default_profile")
+    default = values.get(("default_profile", ""))
     if default is not None and default not in profiles:
         raise ConfigError(
-            f"{path}: default_profile {default!r} names no [profile.{default}] table"
+            f"{sources[('default_profile', '')]}: default_profile {default!r}"
+            f" names no [profile.{default}] table"
         )
 
     return Config(
@@ -424,10 +558,21 @@ def _warn_bare_urls(doc: dict) -> None:
         print("  Use [label](url) in prose, or <url> for a card on its own line.")
 
 
+def _source(profile: Profile) -> tuple[str, str]:
+    """The plan row that names the config file the profile came from."""
+    if profile.replaces:
+        return (
+            "Source",
+            f"{profile.source}, which replaces the profile in {profile.replaces}",
+        )
+    return ("Source", profile.source)
+
+
 def cmd_defaults(args: argparse.Namespace, config: Config) -> int:
     profile, reason = resolve_profile(config, args.profile, repo_path(args.repo))
     rows = [
         ("Profile", f"{profile.name} ({reason})"),
+        _source(profile),
         ("Project", profile.project),
         ("Type", profile.type),
         ("Assignee", profile.assignee or "(none)"),
@@ -478,6 +623,7 @@ def cmd_create(args: argparse.Namespace, config: Config) -> int:
     _print_plan(
         [
             ("Profile", f"{profile.name} ({reason})"),
+            _source(profile),
             ("Project", profile.project),
             ("Type", issue_type),
             ("Summary", summary),

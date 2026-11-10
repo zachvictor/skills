@@ -5,6 +5,8 @@ fake that records the call and answers `workitem view` with canned fields.
 """
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import jira_ticket as jt
@@ -127,6 +129,189 @@ def test_gitlab_paths_is_the_old_name_of_repo_paths(tmp_path):
 def test_missing_config_names_the_example(tmp_path):
     with pytest.raises(jt.ConfigError, match="example"):
         jt.load_config(tmp_path / "absent.toml")
+
+
+# --- includes --------------------------------------------------------------
+
+INCLUDE_EXAMPLE = EXAMPLE.with_name("include.example.toml")
+TEAM_A = "~/team origin/main:a.toml"
+TEAM_B = "~/team origin/main:b.toml"
+
+
+@pytest.fixture
+def team(monkeypatch):
+    """Serve team files by their include path instead of running git."""
+    files: dict[str, str] = {}
+    monkeypatch.setattr(jt, "read_include", lambda include: files[include.path])
+    return files
+
+
+def personal(tmp_path, *team_paths, head=""):
+    """A personal config: ``head``, then one [[include]] per team path."""
+    includes = "".join(
+        f'\n[[include]]\nrepo = "~/team"\nref = "origin/main"\npath = "{p}"\n'
+        for p in team_paths
+    )
+    path = tmp_path / "personal.toml"
+    path.write_text(head + includes, encoding="utf-8")
+    return path
+
+
+def git(repo, *args):
+    """Run git in ``repo`` without the user's config, which may sign commits."""
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+    subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, env=env
+    )
+
+
+def test_include_example_loads(team):
+    team["docs/jira-ticket.toml"] = EXAMPLE.read_text(encoding="utf-8")
+    config = jt.load_config(INCLUDE_EXAMPLE)
+    assert config.site == "acme.atlassian.net"
+    assert config.default_profile == "acme"  # the personal key wins
+    assert config.profiles["platform-data"].source == (
+        "~/src/acme/platform/data origin/main:docs/jira-ticket.toml"
+    )
+
+
+def test_a_team_file_supplies_the_config(tmp_path, team):
+    team["a.toml"] = CONFIG
+    config = jt.load_config(personal(tmp_path, "a.toml"))
+    profile, _ = jt.resolve_profile(config, None, "acme/data/etl/jobs")
+    assert (profile.name, profile.source, profile.replaces) == ("etl", TEAM_A, None)
+    assert config.statuses["ACME"] == ("To Do", "on integration", "Done")
+
+
+def test_the_personal_config_replaces_a_team_profile(
+    tmp_path, team, acli, monkeypatch, capsys
+):
+    team["a.toml"] = CONFIG
+    head = '[profile.data]\nproject = "ACME"\nparent = "ACME-200"\n'
+    head += 'repo_paths = ["acme/data"]\n'
+    path = personal(tmp_path, "a.toml", head=head)
+    config = jt.load_config(path)
+    assert config.profiles["data"].parent == "ACME-200"
+    assert run(config, monkeypatch, ["defaults"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert f"Source:   {path}, which replaces the profile in {TEAM_A}" in out
+
+
+def test_an_identical_personal_copy_replaces_nothing(tmp_path, team):
+    team["a.toml"] = CONFIG
+    head = '[profile.etl]\nproject = "ACME"\nrepo_paths = ["acme/data/etl"]\n'
+    config = jt.load_config(personal(tmp_path, "a.toml", head=head))
+    assert config.profiles["etl"].replaces is None
+
+
+@pytest.mark.parametrize(
+    ("second", "shown"),
+    [
+        ('site = "other.atlassian.net"\n', "'site'"),
+        ('[project.ACME]\nstatuses = ["Done"]\n', "[project.ACME]"),
+        ('[profile.data]\nproject = "ACME"\n', "[profile.data]"),
+    ],
+)
+def test_team_files_that_disagree_fail_and_name_both(tmp_path, team, second, shown):
+    team["a.toml"], team["b.toml"] = CONFIG, second
+    with pytest.raises(jt.ConfigError) as exc:
+        jt.load_config(personal(tmp_path, "a.toml", "b.toml"))
+    assert str(exc.value).startswith(f"{TEAM_A} and {TEAM_B} disagree on {shown};")
+
+
+def test_team_files_may_repeat_a_definition(tmp_path, team):
+    # The old key name and a trailing slash do not change the definition.
+    team["a.toml"] = CONFIG
+    team["b.toml"] = (
+        'site = "acme.atlassian.net"\n'
+        '[profile.etl]\nproject = "ACME"\ngitlab_paths = ["acme/data/etl/"]\n'
+    )
+    config = jt.load_config(personal(tmp_path, "a.toml", "b.toml"))
+    assert config.profiles["etl"].source == TEAM_A
+
+
+def test_one_path_claimed_in_two_files_names_both(tmp_path, team):
+    team["a.toml"] = CONFIG
+    team["b.toml"] = '[profile.other]\nproject = "ACME"\nrepo_paths = ["acme/data"]\n'
+    with pytest.raises(jt.ConfigError) as exc:
+        jt.load_config(personal(tmp_path, "a.toml", "b.toml"))
+    assert str(exc.value) == (
+        f"profiles 'data' ({TEAM_A}) and 'other' ({TEAM_B}) both claim 'acme/data'"
+    )
+
+
+def test_includes_do_not_nest(tmp_path, team):
+    team["a.toml"] = CONFIG + '[[include]]\nrepo = "~/x"\nref = "main"\npath = "b"\n'
+    with pytest.raises(jt.ConfigError, match="do not nest"):
+        jt.load_config(personal(tmp_path, "a.toml"))
+
+
+def test_site_must_be_set_somewhere(tmp_path, team):
+    team["a.toml"] = CONFIG.replace('site = "acme.atlassian.net"\n', "")
+    with pytest.raises(jt.ConfigError, match="set 'site' here or in an included"):
+        jt.load_config(personal(tmp_path, "a.toml"))
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ('[[include]]\nrepo = "~/t"\npath = "a"\n', "include 1 lacks ref"),
+        (
+            '[[include]]\nrepo = "~/t"\nref = "main"\npath = "a"\nbranch = "x"\n',
+            "unknown keys: branch",
+        ),
+        ('[[include]]\nrepo = "t"\nref = "main"\npath = "a"\n', "absolute"),
+        ('[[include]]\nrepo = "~/t"\nref = ""\npath = "a"\n', "non-empty"),
+        ('[include]\nrepo = "~/t"\nref = "main"\npath = "a"\n', r"\[\[include\]\]"),
+    ],
+)
+def test_bad_include_fails_loudly(tmp_path, team, body, message):
+    path = tmp_path / "personal.toml"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(jt.ConfigError, match=message):
+        jt.load_config(path)
+
+
+@pytest.mark.parametrize("bom", ["", "\ufeff"])  # Windows editors may add one
+def test_include_reads_the_ref_not_the_working_tree(tmp_path, bom):
+    repo = tmp_path / "team"
+    (repo / "docs").mkdir(parents=True)
+    git(repo, "init", "--quiet", "--initial-branch=main")
+    team_file = repo / "docs" / "jira-ticket.toml"
+    team_file.write_text(bom + CONFIG, encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "--quiet", "-m", "team config")
+    git(repo, "switch", "--quiet", "-c", "feature")
+    team_file.write_text(CONFIG.replace("acme.", "stale."), encoding="utf-8")
+    path = tmp_path / "personal.toml"
+    path.write_text(
+        f"[[include]]\nrepo = '{repo.as_posix()}'\nref = 'main'\n"
+        "path = 'docs/jira-ticket.toml'\n",
+        encoding="utf-8",
+    )
+    assert jt.load_config(path).site == "acme.atlassian.net"
+
+
+def test_include_of_a_missing_ref_shows_the_git_error(tmp_path):
+    repo = tmp_path / "team"
+    repo.mkdir()
+    git(repo, "init", "--quiet")
+    path = tmp_path / "personal.toml"
+    path.write_text(
+        f"[[include]]\nrepo = '{repo.as_posix()}'\nref = 'origin/develop'\n"
+        "path = 'x.toml'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(jt.ConfigError, match=r"cannot read .* origin/develop:x\.toml"):
+        jt.load_config(path)
 
 
 # --- profile selection -----------------------------------------------------

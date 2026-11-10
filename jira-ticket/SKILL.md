@@ -69,9 +69,23 @@ lives outside the skill because the site, the project, and the epic keys are pri
   the old name of `repo_paths` and still works.
 - `[project.<KEY>] types` and `statuses` are the shortlists for a Jira project. The
   comments next to them say when each one applies. Read them before you choose.
+- An `[[include]]` table reads a team config file as committed at a git ref in a local
+  checkout, such as `origin/develop:docs/jira-ticket.toml`. See
+  `examples/include.example.toml`. Team files must agree with each other. The personal
+  config can replace any key or table in them.
 
-When an epic closes and the next one opens, change `parent` in the profile. The dry run
-prints the parent's summary and status, so a stale epic shows in every plan.
+The plan's `Source` line names the file that the profile came from. When it says that the
+personal config replaces a team profile, tell the user: the personal copy may be stale.
+
+When an epic closes and the next one opens, change `parent` in the profile. For a team file,
+that change is a merge request to the team's repo. The dry run prints the parent's summary
+and status, so a stale epic shows in every plan. If the parent comes from a team file and is
+closed, run `git fetch` in that checkout, and run the dry run again.
+
+If an include fails, the error names the include. When it quotes git, the user has usually
+not cloned or fetched the team's repo. When it is a TOML or config error in the team file,
+the team file needs a fix in the team's repo. In both cases, ask the user; do not edit the
+include or the team file.
 
 ## Workflows
 

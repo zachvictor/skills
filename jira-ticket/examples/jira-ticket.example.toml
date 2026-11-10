@@ -1,6 +1,9 @@
 # Defaults for the jira-ticket skill. Copy to ~/.claude/jira-ticket.toml
 # (or point $JIRA_TICKET_CONFIG at it) and replace the example values.
 #
+# A team can instead commit a file like this one to a repo, and each member
+# includes it from a small personal config: see include.example.toml.
+#
 # The skill picks a profile in this order:
 #
 # 1. --profile on the command line

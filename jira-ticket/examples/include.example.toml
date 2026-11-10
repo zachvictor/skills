@@ -1,0 +1,24 @@
+# A personal config for the jira-ticket skill that reads the team's config
+# from a git repo, so that you do not keep a copy of it. Save this file as
+# ~/.claude/jira-ticket.toml, or point $JIRA_TICKET_CONFIG at it.
+#
+# Put the top-level keys first. In TOML, a key after a table header belongs
+# to that table.
+
+# Optional. A key or a table here replaces the one in the team files. When
+# a [profile.NAME] here replaces a team profile, the plan's Source line
+# names the team file.
+default_profile = "acme"
+
+# A team config file in the format of jira-ticket.example.toml. The skill
+# reads it as committed at `ref` in the checkout at `repo`, not from the
+# working tree, so the branch you have checked out does not matter. With a
+# remote branch such as origin/main, the file is as current as your last
+# `git fetch`.
+#
+# Add one [[include]] table for each team file. The team files must agree
+# with each other, and they cannot include more files.
+[[include]]
+repo = "~/src/acme/platform/data"  # absolute, or starting with ~
+ref = "origin/main"
+path = "docs/jira-ticket.toml"
