@@ -301,25 +301,16 @@ def parse_setup_cfg(path: Path) -> list[tuple[str, str | None]]:
                     deps.append((m.group(1), m.group(3) or None))
             continue
         if in_deps:
-            if (
-                stripped
-                and not stripped.startswith("[")
-                and not stripped.startswith("#")
-            ):
-                m = _REQ_RE.match(stripped)
-                if m:
-                    deps.append((m.group(1), m.group(3) or None))
-            elif stripped.startswith("[") or (
-                stripped
-                and "=" in stripped
-                and not stripped[0].isspace()
-                and line[0] != " "
-                and line[0] != "\t"
-            ):
-                break
-            elif not stripped:
-                # blank line might end the section — but often they continue
+            # Blank lines and comments do not end a multi-line value.
+            if not stripped or stripped.startswith("#"):
                 continue
+            # The lines of the value are indented. A line at column 0 is the
+            # next key or a section header, and ends the value.
+            if not line[0].isspace():
+                break
+            m = _REQ_RE.match(stripped)
+            if m:
+                deps.append((m.group(1), m.group(3) or None))
     return deps
 
 
@@ -364,25 +355,24 @@ def parse_conda_env(path: Path) -> list[tuple[str, str | None]]:
     """Parse conda environment.yml — extract pip dependencies section."""
     text = path.read_text(encoding="utf-8")
     deps = []
-    in_pip = False
+    pip_indent: int | None = None  # the indent of "- pip:", inside its list
     for line in text.splitlines():
         stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
         if stripped == "- pip:":
-            in_pip = True
+            pip_indent = indent
             continue
-        if in_pip:
-            if stripped.startswith("- "):
-                dep = stripped[2:].strip()
-                m = _REQ_RE.match(dep)
-                if m:
-                    deps.append((m.group(1), m.group(3) or None))
-            elif (
-                not stripped.startswith("#")
-                and stripped
-                and not stripped.startswith("-")
-            ):
-                # exited pip section
-                in_pip = False
+        if pip_indent is None or not stripped or stripped.startswith("#"):
+            continue
+        # The pip list is indented deeper than "- pip:". A line at that indent
+        # or less, such as a conda package after the list, ends the list.
+        if indent <= pip_indent:
+            pip_indent = None
+            continue
+        if stripped.startswith("- "):
+            m = _REQ_RE.match(stripped[2:].strip())
+            if m:
+                deps.append((m.group(1), m.group(3) or None))
     return deps
 
 

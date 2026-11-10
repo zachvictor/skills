@@ -468,6 +468,45 @@ def test_setup_cfg_round_trip(tmp_path):
     assert path.read_text() == "[options]\ninstall_requires =\n    requests~=2.32.5\n"
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(
+            "install_requires =\n    requests>=2.28.0\n\n    # a comment\n    click\n",
+            [("requests", "2.28.0"), ("click", None)],
+            id="multi-line",
+        ),
+        pytest.param(
+            "install_requires = requests>=2.28.0\n",
+            [("requests", "2.28.0")],
+            id="same-line",
+        ),
+    ],
+)
+def test_setup_cfg_value_ends_at_the_next_key(tmp_path, value, expected):
+    path = tmp_path / "setup.cfg"
+    path.write_text(
+        f"[options]\n{value}python_requires = >=3.8\npackages = find:\n"
+        "\n[options.extras_require]\ndev = pytest\n",
+        encoding="utf-8",
+    )
+    assert cv.parse_setup_cfg(path) == expected
+
+
+@pytest.mark.parametrize(
+    "indent", [pytest.param("  ", id="indented"), pytest.param("", id="flush")]
+)
+def test_conda_pip_list_ends_at_the_next_conda_package(tmp_path, indent):
+    path = tmp_path / "environment.yml"
+    path.write_text(
+        f"dependencies:\n{indent}- python=3.11\n{indent}- pip:\n"
+        f"{indent}  - requests>=2.28.0\n\n{indent}  # a comment\n{indent}  - flask\n"
+        f"{indent}- numpy=1.26\nchannels:\n{indent}- conda-forge\n",
+        encoding="utf-8",
+    )
+    assert cv.parse_conda_env(path) == [("requests", "2.28.0"), ("flask", None)]
+
+
 def test_conda_env_round_trip(tmp_path):
     path = tmp_path / "environment.yml"
     path.write_text("dependencies:\n  - pip:\n    - requests>=2.28.0\n")
