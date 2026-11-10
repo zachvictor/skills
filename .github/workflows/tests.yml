@@ -29,4 +29,7 @@ jobs:
           # The oldest Python that the skills support. Python 3.15 makes UTF-8
           # mode the default (PEP 686), which would hide encoding bugs.
           python-version: "3.11"
+      # The slackcopy tests need zsh and pandoc. They skip on Windows.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pandoc zsh
       - run: uv run --locked --group dev pytest

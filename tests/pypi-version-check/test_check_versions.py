@@ -7,8 +7,10 @@ these tests is silent — a pattern that fails to match writes the file back
 unchanged while the CLI still prints "Updated", so the tests here assert on
 exact output rather than on "it didn't crash".
 
-Nothing here touches the network; only the parsers and updaters are exercised.
+Nothing here touches the network: the tests of main() replace batch_lookup.
 """
+
+import sys
 
 import check_versions as cv
 import pytest
@@ -426,6 +428,36 @@ def test_regex_fallback_skips_config_keys_outside_dependency_sections(tmp_path):
     assert cv._parse_pyproject_toml_regex(path) == []
 
 
+def test_pyproject_parser_reads_every_dependency_table(tmp_path):
+    path = tmp_path / "pyproject.toml"
+    path.write_text(
+        "[project]\n"
+        'dependencies = ["requests>=2.28.0"]\n'
+        "\n[project.optional-dependencies]\n"
+        'web = ["flask[async]~=2.0"]\n'
+        "\n[dependency-groups]\n"
+        'dev = ["pytest>=8.0", {include-group = "lint"}]\n'
+        'lint = ["ruff"]\n'
+        "\n[tool.uv]\n"
+        'dev-dependencies = ["mypy==1.11.0"]\n'
+        "\n[tool.poetry.dependencies]\n"
+        'python = "^3.11"\n'
+        'httpx = "^0.27.0"\n'
+        "\n[tool.poetry.group.docs.dependencies]\n"
+        'mkdocs = "1.6.0"\n',
+        encoding="utf-8",
+    )
+    assert cv.parse_pyproject_toml(path) == [
+        ("requests", "2.28.0"),
+        ("flask", "2.0"),
+        ("pytest", "8.0"),
+        ("ruff", None),
+        ("mypy", "1.11.0"),
+        ("httpx", "0.27.0"),
+        ("mkdocs", "1.6.0"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # The other formats — these share _NAME / _EXTRAS / _OP with the pyproject
 # patterns, so they are the regression guard for that extraction.
@@ -534,6 +566,18 @@ def test_pipfile_inline_table_keeps_its_other_keys(tmp_path):
     assert path.read_text() == (
         '[packages]\nrequests = {version = "~=2.32.5", extras = ["s"]}\n'
     )
+
+
+def test_pipfile_reads_only_the_package_sections(tmp_path):
+    path = tmp_path / "Pipfile"
+    path.write_text(
+        '[[source]]\nurl = "https://pypi.org/simple"\n'
+        '\n[packages]\nrequests = "==2.28.0"\n'
+        '\n[dev-packages]\npytest = "*"\n'
+        '\n[requires]\npython_version = "3.11"\n',
+        encoding="utf-8",
+    )
+    assert cv.parse_pipfile(path) == [("requests", "2.28.0"), ("pytest", None)]
 
 
 def test_detect_parser_routing():
@@ -701,3 +745,60 @@ def test_requirements_parser_skips_a_direct_reference(tmp_path):
     path = tmp_path / "requirements.txt"
     path.write_bytes(b"requests @ https://example.com/requests.whl\nflask>=2.0\n")
     assert cv.parse_requirements_txt(path) == [("flask", "2.0")]
+
+
+# ---------------------------------------------------------------------------
+# main(): the report and the exit status. The status is 0 when nothing needs a
+# change and after --update, 1 when a package needs a change or is not on
+# PyPI, and 2 when the file cannot be checked.
+# ---------------------------------------------------------------------------
+
+
+def check(monkeypatch, path, latest, *flags):
+    """Run main() with `latest` as PyPI's answers; return the exit status."""
+    monkeypatch.setattr(
+        cv, "batch_lookup", lambda names: {name: latest.get(name) for name in names}
+    )
+    monkeypatch.setattr(sys, "argv", ["check_versions.py", str(path), *flags])
+    with pytest.raises(SystemExit) as stop:
+        cv.main()
+    return stop.value.code
+
+
+MAIN_CASES = [
+    pytest.param(
+        "requests==2.32.5\n", 0, "All dependencies are up to date!", id="current"
+    ),
+    pytest.param("requests==2.28.0\n", 1, "⬆ outdated", id="outdated"),
+    pytest.param("requests\n", 1, "📌 pin it", id="unpinned"),
+    pytest.param("private-pkg==1.0\n", 1, "could not be found on PyPI", id="not-found"),
+    pytest.param("# no pins\n", 0, "No dependencies found", id="empty"),
+]
+
+
+@pytest.mark.parametrize(("src", "status", "message"), MAIN_CASES)
+def test_main_reports_and_exits_without_changing_the_file(
+    monkeypatch, capsys, tmp_path, src, status, message
+):
+    path = tmp_path / "requirements.txt"
+    path.write_text(src, encoding="utf-8")
+    assert check(monkeypatch, path, {"requests": "2.32.5"}) == status
+    assert message in capsys.readouterr().out
+    assert path.read_text(encoding="utf-8") == src
+
+
+def test_main_update_rewrites_only_what_is_behind(monkeypatch, capsys, tmp_path):
+    path = tmp_path / "requirements.txt"
+    path.write_text("requests==2.28.0\nflask==3.1.0\n", encoding="utf-8")
+    latest = {"requests": "2.32.5", "flask": "3.1.0"}
+    assert check(monkeypatch, path, latest, "--update", "--operator", ">=") == 0
+    assert path.read_text(encoding="utf-8") == "requests>=2.32.5\nflask==3.1.0\n"
+    assert "Updated requirements.txt with operator '>='" in capsys.readouterr().out
+
+
+def test_main_refuses_a_missing_file_and_an_unknown_kind(monkeypatch, capsys, tmp_path):
+    assert check(monkeypatch, tmp_path / "requirements.txt", {}) == 2
+    assert "not found" in capsys.readouterr().err
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    assert check(monkeypatch, tmp_path / "README.md", {}) == 2
+    assert "don't know how to parse README.md" in capsys.readouterr().err

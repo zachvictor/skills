@@ -1,5 +1,8 @@
 import argparse
+import dataclasses
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -75,6 +78,42 @@ def test_parse_remote(url, expected):
 def test_parse_remote_rejects_a_local_path():
     with pytest.raises(sw.SlackwriteError, match="cannot read"):
         sw.parse_remote("/srv/git/query-api.git")
+
+
+# --- current_repo ------------------------------------------------------------
+
+
+def git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def clone(tmp_path, monkeypatch):
+    """A repo on the branch `local`, with an origin remote and no upstream."""
+    # Keep the user's and the system's git config out of the test.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    git(tmp_path, "init", "-q", "-b", "local")
+    git(tmp_path, "remote", "add", "origin", "git@gitlab.com:acme/data/query-api.git")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_current_repo_names_the_branch_as_the_remote_does(clone):
+    git(clone, "config", "branch.local.remote", "origin")
+    git(clone, "config", "branch.local.merge", "refs/heads/feat/ACME-1")
+    repo = sw.current_repo()
+    assert repo.root.samefile(clone)
+    assert (repo.host, repo.path, repo.branch) == (
+        "gitlab.com",
+        "acme/data/query-api",
+        "feat/ACME-1",
+    )
+
+
+def test_current_repo_needs_an_upstream(clone):
+    with pytest.raises(sw.SlackwriteError, match="'local' has no upstream"):
+        sw.current_repo()
 
 
 def test_repo_name_is_the_last_path_segment():
@@ -496,6 +535,45 @@ def test_jira_site_reports_a_missing_config(tmp_path, monkeypatch):
     monkeypatch.setenv(sw.JIRA_CONFIG_ENV, str(tmp_path / "missing.toml"))
     with pytest.raises(sw.SlackwriteError, match="cannot read"):
         sw.jira_site()
+
+
+# --- the mr command ----------------------------------------------------------
+
+
+@pytest.fixture
+def mr_command(tmp_path, monkeypatch):
+    """Run `mr` on the given MRs; return the text and the path for `deliver`."""
+    repo = sw.Repo(tmp_path, "gitlab.com", REPO.path, REPO.branch)
+    delivered: dict = {}
+    monkeypatch.setattr(sw, "current_repo", lambda: repo)
+    monkeypatch.setattr(sw, "jira_site", lambda: SITE)
+    monkeypatch.setattr(
+        sw, "deliver", lambda text, path: delivered.update(text=text, path=path)
+    )
+
+    def run_mr(mrs: list[sw.MR], *argv: str) -> tuple[str, Path]:
+        monkeypatch.setattr(sw, "gitlab_mrs", lambda repo, mine: (mrs, {}))
+        assert sw.main(["mr", *argv]) == 0
+        return delivered["text"], delivered["path"]
+
+    return run_mr
+
+
+def test_mr_for_one_mr_drafts_in_its_ticket_directory(mr_command, tmp_path, capsys):
+    ticket_dir = tmp_path / "tmp" / "add-cache_ACME-2"
+    ticket_dir.mkdir(parents=True)
+    draft = dataclasses.replace(mr(2, "feat: add a cache", "ACME-2"), draft=True)
+    text, path = mr_command([draft], "--note", "  Small change.  ")
+    assert path == ticket_dir / "slack-mr.md"
+    assert text.splitlines()[2:] == ["Small change.  ", "_Please review_"]
+    assert "!2 is a draft" in capsys.readouterr().err
+
+
+def test_mr_for_many_mrs_drafts_outside_any_ticket_directory(mr_command, tmp_path):
+    (tmp_path / "tmp" / "add-cache_ACME-2").mkdir(parents=True)
+    mrs = [mr(2, "feat: add a cache", "ACME-2"), mr(3, "fix: a bug", "ACME-3")]
+    _, path = mr_command(mrs)
+    assert path == tmp_path / "tmp" / "slackwrite" / "slack-mr.md"
 
 
 # --- GitHub ------------------------------------------------------------------

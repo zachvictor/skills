@@ -48,7 +48,10 @@ def config(tmp_path):
 
 @pytest.fixture
 def acli(monkeypatch):
-    """Record every acli call; answer `view` with fixed fields."""
+    """Record every acli call; answer `view` with fixed fields.
+
+    A call that sends an ADF file is followed in the record by the file's ADF.
+    """
     calls = []
 
     def fake(args):
@@ -56,10 +59,12 @@ def acli(monkeypatch):
         if args[:2] == ["workitem", "view"]:
             fields = {"summary": "Old summary", "status": {"name": "To Do"}}
             return json.dumps({"key": args[2], "fields": fields})
+        for flag in ("--description-file", "--body-file"):
+            if flag in args:
+                # Capture the ADF file while it still exists.
+                adf = Path(args[args.index(flag) + 1]).read_text(encoding="utf-8")
+                calls.append(json.loads(adf))
         if args[:2] == ["workitem", "create"]:
-            # Capture the ADF file while it still exists.
-            flag = args.index("--description-file")
-            calls.append(json.loads(Path(args[flag + 1]).read_text(encoding="utf-8")))
             return json.dumps({"key": "ACME-123"})
         return "{}"
 
@@ -304,6 +309,91 @@ def test_update_type_only(config, acli, monkeypatch):
 def test_update_needs_file_or_type(config, acli, monkeypatch):
     assert run(config, monkeypatch, ["update", "ACME-1"]) == 2
     assert acli == []
+
+
+def test_update_sends_the_summary_and_adf(config, acli, monkeypatch, tmp_path, capsys):
+    path = draft(tmp_path, "# New summary\n\n**Body**\n")
+    assert run(config, monkeypatch, ["update", "ACME-1", "--file", str(path)]) == 0
+    edit, adf = acli[-2], acli[-1]
+    assert edit[:5] == ["workitem", "edit", "--key", "ACME-1", "--yes"]
+    assert edit[edit.index("--summary") + 1] == "New summary"
+    assert adf["content"][0]["content"][0]["marks"] == [{"type": "strong"}]
+    assert not Path(edit[edit.index("--description-file") + 1]).exists()
+    assert (
+        "Updated ACME-1: https://acme.atlassian.net/browse/ACME-1"
+        in capsys.readouterr().out
+    )
+
+
+def test_transition_to_the_current_status_sends_nothing(
+    config, acli, monkeypatch, capsys
+):
+    assert run(config, monkeypatch, ["transition", "ACME-1", "to do"]) == 0
+    assert not any(call[:2] == ["workitem", "transition"] for call in acli)
+    assert "Already there: nothing to do." in capsys.readouterr().out
+
+
+def test_transition_any_sends_an_unlisted_status_as_written(config, acli, monkeypatch):
+    assert run(config, monkeypatch, ["transition", "ACME-1", "Blocked", "--any"]) == 0
+    assert acli[-1][:6] == [
+        "workitem",
+        "transition",
+        "--key",
+        "ACME-1",
+        "--status",
+        "Blocked",
+    ]
+
+
+def comment(tmp_path, text):
+    path = tmp_path / "comment.md"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_comment_dry_run_warns_and_sends_nothing(
+    config, acli, monkeypatch, tmp_path, capsys
+):
+    path = comment(tmp_path, "Fixed in ACME-XXXXX, see https://e.com/x\n")
+    argv = ["comment", "ACME-1", "--file", str(path), "--dry-run"]
+    assert run(config, monkeypatch, argv) == 0
+    assert all(call[:2] == ["workitem", "view"] for call in acli)
+    out = capsys.readouterr().out
+    assert "Ticket:  ACME-1 'Old summary' (To Do)" in out
+    assert "still contains ACME-XXXXX" in out
+    assert "bare URL shown as its own text: https://e.com/x" in out
+    assert "Dry run: nothing sent." in out
+
+
+def test_comment_sends_adf_and_removes_the_temp_file(
+    config, acli, monkeypatch, tmp_path, capsys
+):
+    path = comment(tmp_path, "**Merged.**\n")
+    assert run(config, monkeypatch, ["comment", "ACME-1", "--file", str(path)]) == 0
+    send, adf = acli[-2], acli[-1]
+    assert send[:6] == ["workitem", "comment", "create", "--key", "ACME-1", "--json"]
+    assert adf["content"][0]["content"][0]["marks"] == [{"type": "strong"}]
+    assert not Path(send[send.index("--body-file") + 1]).exists()
+    assert (
+        "Commented on ACME-1: https://acme.atlassian.net/browse/ACME-1"
+        in capsys.readouterr().out
+    )
+
+
+def test_comment_refuses_an_empty_file(config, acli, monkeypatch, tmp_path, capsys):
+    path = comment(tmp_path, "\n  \n")
+    assert run(config, monkeypatch, ["comment", "ACME-1", "--file", str(path)]) == 1
+    assert acli == []
+    assert "is empty" in capsys.readouterr().err
+
+
+def test_defaults_shows_the_profile_and_why(config, acli, monkeypatch, capsys):
+    assert run(config, monkeypatch, ["defaults"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "Profile:  data (repo acme/data/pipeline is under acme/data)" in out
+    assert "Parent:   ACME-100 'Old summary' (To Do)" in out
+    assert "Types:    Task, Bug" in out
+    assert "Statuses: To Do, on integration, Done" in out
 
 
 def test_bare_urls_finds_only_links_that_show_their_url():
